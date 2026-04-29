@@ -1,0 +1,472 @@
+/* TradingView-inspired dark terminal UI (unofficial — aesthetic only) */
+
+:root {
+  --tv-bg: #131722;
+  --tv-bg-panel: #1e222d;
+  --tv-border: #363a45;
+  --tv-text: #d1d4dc;
+  --tv-muted: #787b86;
+  --tv-up: #089981;
+  --tv-down: #f23645;
+  --tv-blue: #2962ff;
+  --tv-blue-dim: #1e53e5;
+  --nav-h: 44px;
+  --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--tv-bg);
+  color: var(--tv-text);
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Trebuchet MS",
+    Roboto,
+    Ubuntu,
+    sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: none;
+}
+
+/* —— Top bar (chart terminal) —— */
+.nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  height: var(--nav-h);
+  background: var(--tv-bg-panel);
+  border-bottom: 1px solid var(--tv-border);
+}
+
+.nav__inner {
+  max-width: 1920px;
+  margin: 0 auto;
+  padding: 0 16px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.logo {
+  color: var(--tv-text);
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.02em;
+}
+
+.logo__dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 1px;
+  background: var(--tv-blue);
+  vertical-align: middle;
+}
+
+.nav__links {
+  display: flex;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.nav__links a {
+  padding: 6px 10px;
+  border-radius: 4px;
+  color: var(--tv-muted);
+}
+
+.nav__links a:hover {
+  color: var(--tv-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.nav__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.nav__search {
+  color: var(--tv-muted);
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px;
+  cursor: default;
+}
+
+.nav__pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--tv-bg);
+  color: var(--tv-muted);
+  border: 1px solid var(--tv-border);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* —— Hero / chart header —— */
+.hero {
+  position: relative;
+  min-height: 70vh;
+  display: flex;
+  align-items: stretch;
+  padding-top: var(--nav-h);
+}
+
+.hero__bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-color: var(--tv-bg);
+  background-image:
+    linear-gradient(rgba(54, 58, 69, 0.45) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(54, 58, 69, 0.22) 1px, transparent 1px);
+  background-size: 100% 40px, 56px 100%;
+  background-position: 0 0, 0 0;
+}
+
+.hero__vignette {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(19, 23, 34, 0.2) 0%, rgba(19, 23, 34, 0.75) 88%);
+}
+
+.hero__content {
+  position: relative;
+  z-index: 2;
+  align-self: flex-end;
+  padding: 24px 4vw 40px;
+  max-width: 520px;
+}
+
+.hero__toolbar {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 16px;
+  padding: 4px;
+  width: fit-content;
+  background: var(--tv-bg-panel);
+  border: 1px solid var(--tv-border);
+  border-radius: 4px;
+}
+
+.hero__tf {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--tv-muted);
+  border-radius: 3px;
+  cursor: default;
+}
+
+.hero__tf--on {
+  color: var(--tv-text);
+  background: rgba(41, 98, 255, 0.22);
+}
+
+.hero__tag {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tv-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.hero__title {
+  margin: 0 0 12px;
+  font-size: clamp(22px, 4vw, 28px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+  color: var(--tv-text);
+}
+
+.hero__desc {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--tv-muted);
+}
+
+.hero__code {
+  font-size: 12px;
+  padding: 2px 6px;
+  background: var(--tv-bg-panel);
+  border: 1px solid var(--tv-border);
+  border-radius: 3px;
+  color: var(--tv-blue);
+  font-family: ui-monospace, monospace;
+}
+
+.hero__twse {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--tv-text);
+  max-width: 100%;
+  padding: 12px 14px;
+  background: var(--tv-bg-panel);
+  border: 1px solid var(--tv-border);
+  border-radius: 4px;
+}
+
+.hero__twse .tv-up {
+  color: var(--tv-up);
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.hero__twse .tv-down {
+  color: var(--tv-down);
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.hero__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.btn {
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.btn--play {
+  background: var(--tv-blue);
+  color: #fff;
+}
+
+.btn--play:hover {
+  background: var(--tv-blue-dim);
+}
+
+.btn--info {
+  background: transparent;
+  color: var(--tv-text);
+  border: 1px solid var(--tv-border);
+}
+
+.btn--info:hover {
+  border-color: var(--tv-muted);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* —— Historical chart (Lightweight Charts) —— */
+.chart-panel {
+  margin: 0 4vw 24px;
+  background: var(--tv-bg-panel);
+  border: 1px solid var(--tv-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.chart-panel__head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--tv-border);
+}
+
+.chart-panel__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tv-text);
+  letter-spacing: -0.02em;
+}
+
+.chart-panel__canvas {
+  width: 100%;
+  height: min(440px, 55vh);
+  position: relative;
+}
+
+.chart-panel__hint {
+  margin: 0;
+  padding: 8px 14px 12px;
+  font-size: 12px;
+  color: var(--tv-muted);
+  line-height: 1.45;
+}
+
+.ohlc-wrap {
+  border-top: 1px solid var(--tv-border);
+  padding: 12px 14px 16px;
+}
+
+.ohlc-wrap__title {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tv-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ohlc-scroll {
+  overflow-x: auto;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.ohlc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--tv-text);
+}
+
+.ohlc-table th,
+.ohlc-table td {
+  padding: 6px 10px 6px 0;
+  text-align: right;
+  border-bottom: 1px solid var(--tv-border);
+  white-space: nowrap;
+}
+
+.ohlc-table th {
+  position: sticky;
+  top: 0;
+  background: var(--tv-bg-panel);
+  color: var(--tv-muted);
+  font-weight: 600;
+  text-align: right;
+  z-index: 1;
+}
+
+.ohlc-table th:first-child,
+.ohlc-table td:first-child {
+  text-align: left;
+}
+
+/* —— Watchlist-style rows —— */
+.rows {
+  position: relative;
+  z-index: 3;
+  padding: 8px 0 32px;
+  background: var(--tv-bg);
+}
+
+.row {
+  margin-bottom: 20px;
+  padding: 0 4vw;
+}
+
+.row__title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tv-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.row__track {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 6px 2px 12px;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: thin;
+  scrollbar-color: var(--tv-border) transparent;
+  -webkit-overflow-scrolling: touch;
+}
+
+.row__track::-webkit-scrollbar {
+  height: 5px;
+}
+
+.row__track::-webkit-scrollbar-thumb {
+  background: var(--tv-border);
+  border-radius: 3px;
+}
+
+.card {
+  flex: 0 0 auto;
+  width: min(200px, 70vw);
+  aspect-ratio: 16 / 9;
+  scroll-snap-align: start;
+  border-radius: 4px;
+  background: var(--tv-bg-panel);
+  border: 1px solid var(--tv-border);
+  display: flex;
+  align-items: flex-end;
+  padding: 12px;
+  transition:
+    border-color 0.15s var(--ease),
+    box-shadow 0.15s var(--ease);
+}
+
+.card:hover {
+  border-color: rgba(41, 98, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(41, 98, 255, 0.2);
+}
+
+.card--tall {
+  aspect-ratio: 2 / 3;
+  width: min(140px, 42vw);
+}
+
+.card__label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--tv-text);
+}
+
+.footer {
+  padding: 16px 4vw 28px;
+  font-size: 12px;
+  color: var(--tv-muted);
+  border-top: 1px solid var(--tv-border);
+  background: var(--tv-bg-panel);
+}
+
+@media (max-width: 600px) {
+  .nav__links {
+    display: none;
+  }
+
+  .hero {
+    min-height: auto;
+  }
+
+  .hero__content {
+    padding-bottom: 28px;
+  }
+}
