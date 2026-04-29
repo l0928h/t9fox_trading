@@ -83,3 +83,20 @@ py -3 -m http.server 8765
 py -3 -m pip install -e ".[dev]"
 py -3 -m pytest
 ```
+
+## 上架到 GitHub
+
+本機已可用 Git（`main` 分支）。若尚未建立遠端仓库：
+
+1. 在 [GitHub](https://github.com/new) 建立 **New repository**（名稱例如 `T9FOX_TRADE`），**不要**勾選「Initialize with README」（避免與本機初次提交衝突）。
+2. 在專案根目錄執行（將 `YOUR_USER` 改成你的帳號）：
+
+```powershell
+cd c:\work++\T9FOX_TRADE
+git remote add origin https://github.com/YOUR_USER/T9FOX_TRADE.git
+git push -u origin main
+```
+
+若使用 SSH：`git remote add origin git@github.com:YOUR_USER/T9FOX_TRADE.git`
+
+首次 `git push` 時瀏覽器或 Git 憑證管理員會要求登入 GitHub。
