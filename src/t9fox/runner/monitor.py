@@ -350,16 +350,17 @@ class MaBreakoutDayTrader:
             _log(self.symbol, f"BUY ERROR: {e}", error=True)
 
     def _do_sell(self, broker: SinopacBroker, price: float, *, reason: str) -> None:
-        pnl = (price - self._buy_price) * self._position_lots * 1000
+        sell_px = _one_tick_below(price)   # 低 1 檔，提高撮合機率
+        pnl = (sell_px - self._buy_price) * self._position_lots * 1000
         _log(
             self.symbol,
-            f"{reason}  last={price:.2f}  bought={self._buy_price:.2f}"
-            f"  est-PnL={pnl:+,.0f} TWD"
-            f"  → SELL {self._position_lots} lot @ {price:.2f}",
+            f"{reason}  last={price:.2f}  sell@{sell_px:.2f}(-1tick)"
+            f"  bought={self._buy_price:.2f}  est-PnL={pnl:+,.0f} TWD"
+            f"  → SELL {self._position_lots} lot @ {sell_px:.2f}",
         )
         try:
-            result = broker.place_stock_order(self.symbol, "Sell", self._position_lots, price)
-            _save_trade(self.symbol, "Sell", self._position_lots, price,
+            result = broker.place_stock_order(self.symbol, "Sell", self._position_lots, sell_px)
+            _save_trade(self.symbol, "Sell", self._position_lots, sell_px,
                         result.order_id, result.status, broker.creds.simulation,
                         strategy="ma_breakout_s3")
             self._position_lots = 0
@@ -371,6 +372,27 @@ class MaBreakoutDayTrader:
 
 
 # ── helpers ────────────────────────────────────────────────────────────
+
+def _tick_size(price: float) -> float:
+    """台灣股市每檔跳動（依交易所規則）。"""
+    if price < 10:
+        return 0.01
+    elif price < 50:
+        return 0.05
+    elif price < 100:
+        return 0.1
+    elif price < 500:
+        return 0.5
+    elif price < 1000:
+        return 1.0
+    else:
+        return 5.0
+
+
+def _one_tick_below(price: float) -> float:
+    """賣出限價 = 現價 − 1 檔，提高撮合機率。"""
+    return round(price - _tick_size(price), 2)
+
 
 def _log(symbol: str, msg: str, *, error: bool = False) -> None:
     ts  = datetime.datetime.now().strftime("%H:%M:%S")
