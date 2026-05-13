@@ -189,12 +189,14 @@ class MaBreakoutDayTrader:
         self.lots            = lots
         self.sell_time       = datetime.time(*map(int, sell_time.split(":")))
 
-        self._lock                  = threading.Lock()
-        self._bought_today          = False
-        self._pending_buy_order_id  : str | None = None   # 已下單，等待成交回報
-        self._position_lots         = 0
-        self._buy_price             = 0.0
-        self._sold                  = False
+        self._lock                      = threading.Lock()
+        self._bought_today              = False
+        self._pending_buy_order_id      : str | None = None
+        self._pending_buy_filled_shares : int   = 0      # 累計已成交股數
+        self._pending_buy_cost          : float = 0.0    # 累計成本（計算均價用）
+        self._position_lots             = 0
+        self._buy_price                 = 0.0
+        self._sold                      = False
         self._stop                  = threading.Event()
         self._open_px               = None   # 首 tick 作為開盤代理（跳空計算用）
         self._traded_today          : threading.Event | None = None  # 共用旗標
@@ -292,15 +294,16 @@ class MaBreakoutDayTrader:
                 return
 
             if self._position_lots > 0 and not self._sold:
-                # ── stop loss check ───────────────────────────────────
-                stop_px = self.close_prev * (1 - self.stop_loss_pct / 100)
-                if price <= stop_px:
-                    self._do_sell(broker, price, reason="STOP-LOSS")
-                    return
-                # ── take profit check ─────────────────────────────────
-                target = self._buy_price * (1 + self.take_profit_pct / 100)
-                if price >= target:
-                    self._do_sell(broker, price, reason="TAKE-PROFIT")
+                fully_filled = self._pending_buy_order_id is None
+                # ── stop loss / take profit：等完全成交再觸發 ─────────
+                if fully_filled:
+                    stop_px = self.close_prev * (1 - self.stop_loss_pct / 100)
+                    if price <= stop_px:
+                        self._do_sell(broker, price, reason="STOP-LOSS")
+                        return
+                    target = self._buy_price * (1 + self.take_profit_pct / 100)
+                    if price >= target:
+                        self._do_sell(broker, price, reason="TAKE-PROFIT")
                 return
 
             # ── 首個 tick：鎖定開盤價，一次性判斷條件②④ ──────────────
@@ -372,18 +375,29 @@ class MaBreakoutDayTrader:
             _log(self.symbol, f"SELL ERROR: {e}", error=True)
 
     def _on_fill(self, order_id: str, fill_price: float, fill_qty_shares: int) -> None:
-        """訂單成交回報 — 確認買單成交後才建立倉位。"""
+        """訂單成交回報 — 累計所有 fill 事件，全部成交後確認倉位。"""
         with self._lock:
-            if order_id != self._pending_buy_order_id or self._position_lots > 0:
+            if order_id != self._pending_buy_order_id:
                 return
-            fill_lots = fill_qty_shares // 1000
-            if fill_lots <= 0:
+            self._pending_buy_filled_shares += fill_qty_shares
+            self._pending_buy_cost          += fill_price * fill_qty_shares
+            filled_lots = self._pending_buy_filled_shares // 1000
+            if filled_lots <= 0:
                 return
-            self._position_lots        = fill_lots
-            self._buy_price            = fill_price
-            self._pending_buy_order_id = None
-            _log(self.symbol,
-                 f"FILLED  {fill_lots}lot @ {fill_price:.2f}  position confirmed")
+            avg_px = self._pending_buy_cost / self._pending_buy_filled_shares
+            self._position_lots = filled_lots
+            self._buy_price     = avg_px
+            if filled_lots >= self.lots:
+                # 完全成交：清除待確認狀態
+                self._pending_buy_order_id      = None
+                self._pending_buy_filled_shares = 0
+                self._pending_buy_cost          = 0.0
+                _log(self.symbol,
+                     f"FULLY FILLED  {filled_lots}lot @ avg {avg_px:.2f}")
+            else:
+                _log(self.symbol,
+                     f"PARTIAL FILL  {filled_lots}/{self.lots}lot"
+                     f" @ {fill_price:.2f}  avg={avg_px:.2f}")
 
 
 # ── helpers ────────────────────────────────────────────────────────────
