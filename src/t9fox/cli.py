@@ -7,6 +7,22 @@ from t9fox.data.twse_daily import load_or_fetch_daily_bars
 from t9fox.strategy.ma_crossover import MaCrossParams, ma_crossover_targets
 
 
+def _cmd_auto(args: argparse.Namespace) -> int:
+    from t9fox.runner.scheduler import run_daily_loop
+    try:
+        run_daily_loop(
+            symbol=args.symbol,
+            lookback=args.lookback,
+            lots=args.lots,
+            start_time=args.start_time,
+            sell_time=args.sell_time,
+        )
+    except (EnvironmentError, FileNotFoundError) as e:
+        print(f"Credential error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cmd_monitor(args: argparse.Namespace) -> int:
     from t9fox.broker.credentials import SinopacCredentials
     from t9fox.broker.sinopac import SinopacBroker
@@ -181,6 +197,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--slow", type=int, default=30)
     b.add_argument("--refresh", action="store_true")
     b.set_defaults(func=_cmd_backtest)
+
+    au = sub.add_parser("auto", help="Daily loop: sleep until market open, run monitor, repeat each trading day")
+    au.add_argument("symbol", help="Stock code, e.g. 6449")
+    au.add_argument("--lookback",   type=int, default=20,      help="N-day high lookback (default: 20)")
+    au.add_argument("--lots",       type=int, default=1,       help="Lots per trade (default: 1)")
+    au.add_argument("--start-time", default="09:00",           help="Session start HH:MM (default: 09:00)")
+    au.add_argument("--sell-time",  default="13:20",           help="Force-sell time HH:MM (default: 13:20)")
+    au.set_defaults(func=_cmd_auto)
 
     mo = sub.add_parser("monitor", help="Intraday breakout strategy: buy on N-day high break, sell before close")
     mo.add_argument("symbol", help="Stock code, e.g. 6449")
