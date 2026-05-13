@@ -6,7 +6,6 @@ from pathlib import Path
 
 
 def _load_dotenv(project_root: Path) -> None:
-    """Load .env from project root if python-dotenv is available."""
     env_file = project_root / ".env"
     if not env_file.is_file():
         return
@@ -26,9 +25,12 @@ class SinopacCredentials:
     ca_passwd: str | None
     person_id: str | None
 
+    @property
+    def has_ca(self) -> bool:
+        return self.ca_path is not None and self.ca_passwd is not None and self.person_id is not None
+
     @classmethod
     def from_env(cls, project_root: Path | None = None) -> "SinopacCredentials":
-        """Read credentials from environment variables (loads .env if present)."""
         root = project_root or Path(__file__).resolve().parents[3]
         _load_dotenv(root)
 
@@ -58,9 +60,10 @@ class SinopacCredentials:
         ca_passwd = os.environ.get("SINOPAC_CA_PASSWD", "").strip() or None
         person_id = os.environ.get("SINOPAC_PERSON_ID", "").strip() or None
 
+        # Live mode always requires CA; simulation mode requires CA only for order placement
         if not simulation and ca_path is None:
             raise EnvironmentError(
-                "Live trading requires SINOPAC_CA_PATH, SINOPAC_CA_PASSWD, and SINOPAC_PERSON_ID."
+                "Live trading requires SINOPAC_CA_PATH, SINOPAC_CA_PASSWD, SINOPAC_PERSON_ID."
             )
 
         return cls(
@@ -74,5 +77,4 @@ class SinopacCredentials:
 
     def __repr__(self) -> str:
         mode = "simulation" if self.simulation else "LIVE"
-        ca = str(self.ca_path) if self.ca_path else "none"
-        return f"SinopacCredentials(mode={mode}, ca={ca}, api_key=***)"
+        return f"SinopacCredentials(mode={mode}, has_ca={self.has_ca}, api_key=***)"

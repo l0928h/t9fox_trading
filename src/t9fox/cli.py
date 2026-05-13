@@ -7,6 +7,33 @@ from t9fox.data.twse_daily import load_or_fetch_daily_bars
 from t9fox.strategy.ma_crossover import MaCrossParams, ma_crossover_targets
 
 
+def _cmd_connect(args: argparse.Namespace) -> int:
+    from t9fox.broker.credentials import SinopacCredentials
+    from t9fox.broker.sinopac import SinopacBroker
+
+    try:
+        creds = SinopacCredentials.from_env()
+    except (EnvironmentError, FileNotFoundError) as e:
+        print(f"Credential error: {e}", file=sys.stderr)
+        return 1
+
+    print(creds)
+    with SinopacBroker(creds) as broker:
+        positions = broker.list_positions()
+        print(f"Positions ({len(positions)}):")
+        if positions:
+            for p in positions:
+                print(f"  {p.symbol}  qty={p.quantity}  avg={p.avg_price:.2f}  pnl={p.pnl:.2f}")
+        else:
+            print("  (none)")
+
+        if args.symbol:
+            snap = broker.get_snapshot(args.symbol)
+            print(f"\nSnapshot {args.symbol}: {snap}")
+
+    return 0
+
+
 def _cmd_fetch(args: argparse.Namespace) -> int:
     df = load_or_fetch_daily_bars(
         args.symbol,
@@ -95,6 +122,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--slow", type=int, default=30)
     b.add_argument("--refresh", action="store_true")
     b.set_defaults(func=_cmd_backtest)
+
+    cn = sub.add_parser("connect", help="Test Sinopac login, list positions, optionally get snapshot")
+    cn.add_argument("--symbol", default=None, help="Stock code to snapshot, e.g. 2330")
+    cn.set_defaults(func=_cmd_connect)
 
     args = p.parse_args(argv)
     return int(args.func(args))
