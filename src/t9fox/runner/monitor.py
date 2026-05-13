@@ -197,6 +197,7 @@ class MaBreakoutDayTrader:
         self._position_lots             = 0
         self._buy_price                 = 0.0
         self._sold                      = False
+        self._pending_sell_order_id     : str | None = None
         self._stop                  = threading.Event()
         self._open_px               = None   # 首 tick 作為開盤代理（跳空計算用）
         self._traded_today          : threading.Event | None = None  # 共用旗標
@@ -364,15 +365,26 @@ class MaBreakoutDayTrader:
         )
         try:
             result = broker.place_stock_order(self.symbol, "Sell", self._position_lots, sell_px)
+            self._sold                  = True          # 防止重複賣出
+            self._pending_sell_order_id = result.order_id  # 等成交回報才清倉
+            _log(self.symbol, f"Order sent  id={result.order_id}  status={result.status}"
+                              f"  (awaiting sell fill)")
             _save_trade(self.symbol, "Sell", self._position_lots, sell_px,
                         result.order_id, result.status, broker.creds.simulation,
                         strategy="ma_breakout_s3")
-            self._position_lots = 0
-            self._sold          = True
-            _log(self.symbol, f"Order sent  id={result.order_id}  status={result.status}")
-            self._stop.set()
         except Exception as e:
+            self._sold = False   # 下單失敗 → 允許重試
             _log(self.symbol, f"SELL ERROR: {e}", error=True)
+
+    def _on_sell_fill(self, order_id: str) -> None:
+        """賣單成交回報 — 確認後才清倉並停止監控。"""
+        with self._lock:
+            if order_id != self._pending_sell_order_id:
+                return
+            self._position_lots         = 0
+            self._pending_sell_order_id = None
+            self._stop.set()
+            _log(self.symbol, f"SELL CONFIRMED  order={order_id}  position cleared")
 
     def _on_fill(self, order_id: str, fill_price: float, fill_qty_shares: int) -> None:
         """訂單成交回報 — 累計所有 fill 事件，全部成交後確認倉位。"""
@@ -500,7 +512,8 @@ def run_ma_breakout_watchlist(
                 fill_price = float(deal["price"])
                 fill_qty   = int(deal["quantity"])
                 for t in traders.values():
-                    t._on_fill(order_id, fill_price, fill_qty)
+                    t._on_fill(order_id, fill_price, fill_qty)      # 買單成交
+                    t._on_sell_fill(order_id)                        # 賣單成交
         except Exception as e:
             _log("order_cb", f"parse error: {e}", error=True)
 
