@@ -7,6 +7,37 @@ from t9fox.data.twse_daily import load_or_fetch_daily_bars
 from t9fox.strategy.ma_crossover import MaCrossParams, ma_crossover_targets
 
 
+def _cmd_monitor(args: argparse.Namespace) -> int:
+    from t9fox.broker.credentials import SinopacCredentials
+    from t9fox.broker.sinopac import SinopacBroker
+    from t9fox.strategy.breakout import calc_n_day_high
+    from t9fox.runner.monitor import BreakoutDayTrader
+
+    try:
+        creds = SinopacCredentials.from_env()
+    except (EnvironmentError, FileNotFoundError) as e:
+        print(f"Credential error: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        high = calc_n_day_high(args.symbol, args.lookback)
+    except ValueError as e:
+        print(f"Data error: {e}", file=sys.stderr)
+        return 1
+
+    trader = BreakoutDayTrader(
+        symbol=args.symbol,
+        n_day_high=high,
+        lots=args.lots,
+        sell_time=args.sell_time,
+    )
+
+    with SinopacBroker(creds) as broker:
+        trader.run(broker)
+
+    return 0
+
+
 def _cmd_connect(args: argparse.Namespace) -> int:
     from t9fox.broker.credentials import SinopacCredentials
     from t9fox.broker.sinopac import SinopacBroker
@@ -150,6 +181,13 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--slow", type=int, default=30)
     b.add_argument("--refresh", action="store_true")
     b.set_defaults(func=_cmd_backtest)
+
+    mo = sub.add_parser("monitor", help="Intraday breakout strategy: buy on N-day high break, sell before close")
+    mo.add_argument("symbol", help="Stock code, e.g. 6449")
+    mo.add_argument("--lookback", type=int, default=20, help="N-day high lookback (default: 20)")
+    mo.add_argument("--lots", type=int, default=1, help="Lots per trade (default: 1)")
+    mo.add_argument("--sell-time", default="13:20", help="Force-sell time HH:MM (default: 13:20)")
+    mo.set_defaults(func=_cmd_monitor)
 
     pr = sub.add_parser("price", help="Query real-time snapshot (close/change/bid/ask) via Sinopac")
     pr.add_argument("symbols", nargs="+", help="Stock code(s), e.g. 2330 2454 0050")
