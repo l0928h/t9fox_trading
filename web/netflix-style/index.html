@@ -1,120 +1,94 @@
 <!DOCTYPE html>
 <html lang="zh-Hant">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>T9FOX — TradingView 風格儀表板</title>
-    <link rel="stylesheet" href="styles.css" />
-  </head>
-  <body>
-    <header class="nav">
-      <div class="nav__inner">
-        <a class="logo" href="#">T9FOX<span class="logo__dot" aria-hidden="true"></span></a>
-        <nav class="nav__links">
-          <a href="#">圖表</a>
-          <a href="#">策略</a>
-          <a href="#">回測</a>
-          <a href="#">自選</a>
-        </nav>
-        <div class="nav__actions">
-          <span class="nav__search" aria-hidden="true">⌕</span>
-          <span class="nav__pill">TWSE</span>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>T9FOX — 監控清單</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ── Top navbar ─────────────────────────────────────────── -->
+<header class="nav">
+  <div class="nav-logo">T9FOX<span class="nav-dot"></span></div>
+  <nav class="nav-tabs">
+    <button class="nav-tab nav-tab--active" data-view="watchlist">清單</button>
+    <button class="nav-tab" data-view="chart">圖表</button>
+    <button class="nav-tab" data-view="signals">訊號</button>
+  </nav>
+  <div class="nav-right">
+    <span id="last-update" class="nav-ts"></span>
+    <button id="btn-refresh" class="btn-refresh" title="從永豐金刷新即時報價">⟳ 刷新</button>
+  </div>
+</header>
+
+<!-- ── Main layout ────────────────────────────────────────── -->
+<div class="layout">
+
+  <!-- ── Left sidebar: watchlist ──────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-search">
+      <input id="search-input" class="search-input" type="text" placeholder="搜尋代號..." autocomplete="off" />
+    </div>
+
+    <!-- status groups injected by JS -->
+    <div id="watchlist-panel" class="watchlist-panel">
+      <div class="wl-loading">載入清單…</div>
+    </div>
+  </aside>
+
+  <!-- ── Right: chart + table ─────────────────────────────── -->
+  <main class="main">
+
+    <!-- Chart panel -->
+    <div class="chart-wrap" id="chart-wrap">
+      <div class="chart-header">
+        <div class="chart-symbol-info">
+          <span id="chart-symbol" class="chart-sym">—</span>
+          <span id="chart-price" class="chart-price"></span>
+          <span id="chart-change" class="chart-chg"></span>
+        </div>
+        <div class="chart-tfs">
+          <button class="tf-btn tf-btn--active" data-days="60">3M</button>
+          <button class="tf-btn" data-days="125">6M</button>
+          <button class="tf-btn" data-days="250">1Y</button>
+          <button class="tf-btn" data-days="520">2Y</button>
         </div>
       </div>
-    </header>
+      <div id="chart-container" class="chart-container"></div>
+      <div id="chart-hint" class="chart-hint">點擊左側股票載入 K 線圖</div>
+    </div>
 
-    <section class="hero">
-      <div class="hero__bg" aria-hidden="true"></div>
-      <div class="hero__vignette" aria-hidden="true"></div>
-      <div class="hero__content">
-        <div class="hero__toolbar" aria-hidden="true">
-          <span class="hero__tf hero__tf--on">1D</span>
-          <span class="hero__tf">1W</span>
-          <span class="hero__tf">1M</span>
-        </div>
-        <p class="hero__tag">台股 · 日線</p>
-        <h1 class="hero__title">均線交叉 · 回測工作區</h1>
-        <p class="hero__desc">
-          以下為證交所個股<strong>歷史日成交</strong>（STOCK_DAY）載入結果與<strong>日 K 線</strong>。請以
-          <code class="hero__code">t9fox serve</code> 開啟同源頁面。
-        </p>
-        <p id="twse-quote" class="hero__twse" aria-live="polite">連線證交所日線…</p>
-        <div class="hero__buttons">
-          <button type="button" class="btn btn--play">開啟圖表</button>
-          <button type="button" class="btn btn--info">研究</button>
-        </div>
+    <!-- Signals table -->
+    <div class="table-wrap">
+      <div class="table-header">
+        <span class="table-title">訊號一覽</span>
+        <span id="table-date" class="table-date"></span>
       </div>
-    </section>
-
-    <section class="chart-panel" aria-label="歷史日線圖表">
-      <div class="chart-panel__head">
-        <span class="chart-panel__title" id="chart-title">2330 · 日線 OHLC（證交所歷史資料）</span>
+      <div class="table-scroll">
+        <table class="sig-table" id="sig-table">
+          <thead>
+            <tr>
+              <th class="col-sym" data-col="symbol">代號</th>
+              <th class="col-num" data-col="open">開盤</th>
+              <th class="col-num" data-col="close">收盤</th>
+              <th class="col-num" data-col="gap_pct">漲跌%</th>
+              <th class="col-num" data-col="volume">成交量</th>
+              <th class="col-num" data-col="high_20d">20日高</th>
+              <th class="col-num" data-col="gap">差距</th>
+              <th class="col-num" data-col="gap_pct2">Gap%</th>
+              <th class="col-sym" data-col="status">狀態</th>
+            </tr>
+          </thead>
+          <tbody id="sig-tbody"></tbody>
+        </table>
       </div>
-      <div id="chart-container" class="chart-panel__canvas"></div>
-      <p id="chart-hint" class="chart-panel__hint"></p>
-      <div class="ohlc-wrap" id="ohlc-wrap" hidden>
-        <h3 class="ohlc-wrap__title">最近交易日 · 表格</h3>
-        <div class="ohlc-scroll">
-          <table class="ohlc-table" id="ohlc-table" aria-label="日線 OHLCV">
-            <thead>
-              <tr>
-                <th>日期</th>
-                <th>開</th>
-                <th>高</th>
-                <th>低</th>
-                <th>收</th>
-                <th>成交量</th>
-              </tr>
-            </thead>
-            <tbody id="ohlc-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
+    </div>
 
-    <main class="rows">
-      <section class="row">
-        <h2 class="row__title">Watchlist · 策略</h2>
-        <div class="row__track" tabindex="0">
-          <article class="card"><span class="card__label">MA 交叉</span></article>
-          <article class="card"><span class="card__label">2330</span></article>
-          <article class="card"><span class="card__label">0050</span></article>
-          <article class="card"><span class="card__label">多標的</span></article>
-          <article class="card"><span class="card__label">自訂參數</span></article>
-          <article class="card"><span class="card__label">買賣紀錄</span></article>
-        </div>
-      </section>
+  </main>
+</div>
 
-      <section class="row">
-        <h2 class="row__title">回測區間</h2>
-        <div class="row__track" tabindex="0">
-          <article class="card card--tall"><span class="card__label">2024 Q1</span></article>
-          <article class="card card--tall"><span class="card__label">2024 Q2</span></article>
-          <article class="card card--tall"><span class="card__label">2025</span></article>
-          <article class="card card--tall"><span class="card__label">自訂區間</span></article>
-          <article class="card card--tall"><span class="card__label">匯出 CSV</span></article>
-        </div>
-      </section>
-
-      <section class="row">
-        <h2 class="row__title">參數</h2>
-        <div class="row__track" tabindex="0">
-          <article class="card"><span class="card__label">快線 10</span></article>
-          <article class="card"><span class="card__label">慢線 30</span></article>
-          <article class="card"><span class="card__label">手續費</span></article>
-          <article class="card"><span class="card__label">滑價</span></article>
-        </div>
-      </section>
-    </main>
-
-    <footer class="footer">
-      <p>T9FOX · TradingView 風格預覽。橫向列可用滑鼠滾輪橫向捲動。</p>
-    </footer>
-
-    <script
-      src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"
-      crossorigin="anonymous"
-    ></script>
-    <script src="app.js"></script>
-  </body>
+<script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js" crossorigin="anonymous"></script>
+<script src="app.js"></script>
+</body>
 </html>

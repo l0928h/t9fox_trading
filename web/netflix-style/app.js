@@ -1,235 +1,427 @@
-/**
- * TWSE historical daily OHLCV → quote strip + candlestick chart (Lightweight Charts).
- * Depends on t9fox serve (same origin /api). Chart script from CDN (unpkg).
- */
+/* T9FOX — TradingView-style watchlist dashboard */
+'use strict';
 
-function rowsToCandles(rows) {
-  const out = [];
-  for (const row of rows) {
-    const time = String(row.date).slice(0, 10);
-    const open = Number(row.open);
-    const high = Number(row.high);
-    const low = Number(row.low);
-    const close = Number(row.close);
-    if (!time || [open, high, low, close].some((x) => !Number.isFinite(x))) continue;
-    out.push({ time, open, high, low, close });
-  }
-  out.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
-  const byTime = new Map();
-  for (const c of out) byTime.set(c.time, c);
-  return [...byTime.values()].sort((a, b) => (a.time < b.time ? -1 : 1));
+// ── State ──────────────────────────────────────────────────────
+const state = {
+  signals:   [],      // from /api/signals
+  snap:      {},      // symbol → { open, close, change_price, change_rate, volume }
+  symbols:   [],      // from /api/watchlist
+  active:    null,    // currently selected symbol
+  chartDays: 60,
+  sortCol:   'gap_pct',
+  sortAsc:   true,
+  chart:     null,
+  resizeObs: null,
+};
+
+// ── Utilities ──────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const fmt2  = n => Number.isFinite(+n) ? (+n).toFixed(2) : '—';
+const fmtK  = n => Number.isFinite(+n) ? (+n).toLocaleString('zh-TW') : '—';
+const sign  = n => n > 0 ? '+' : '';
+
+function pctClass(v) {
+  if (v > 0) return 'chg-up';
+  if (v < 0) return 'chg-down';
+  return 'chg-flat';
 }
 
-function fillOhlcTable(rows, maxRows) {
-  const wrap = document.getElementById("ohlc-wrap");
-  const tbody = document.getElementById("ohlc-tbody");
-  if (!wrap || !tbody) return;
-
-  const slice = rows.slice(-maxRows).reverse();
-  tbody.replaceChildren();
-  for (const row of slice) {
-    const tr = document.createElement("tr");
-    const d = String(row.date).slice(0, 10);
-    const fmt = (v) => (Number.isFinite(Number(v)) ? Number(v).toLocaleString("zh-TW") : "—");
-    tr.innerHTML = `<td>${d}</td><td>${fmt(row.open)}</td><td>${fmt(row.high)}</td><td>${fmt(row.low)}</td><td>${fmt(row.close)}</td><td>${fmt(row.volume)}</td>`;
-    tbody.appendChild(tr);
-  }
-  wrap.hidden = false;
+function statusPill(s) {
+  const cls = s === 'BREAKOUT' ? 'pill-breakout' : s === 'NEAR' ? 'pill-near' : 'pill-wait';
+  const lbl = s === 'BREAKOUT' ? 'BREAK' : s === 'NEAR' ? 'NEAR' : 'WAIT';
+  return `<span class="status-pill ${cls}">${lbl}</span>`;
 }
 
-let chartInstance = null;
-let chartResizeObserver = null;
+function setLastUpdate(src) {
+  const el = $('last-update');
+  if (!el) return;
+  const t = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  el.textContent = `${t}  ${src}`;
+}
 
-function renderCandleChart(candles) {
-  const container = document.getElementById("chart-container");
-  const hint = document.getElementById("chart-hint");
+// ── Watchlist sidebar ──────────────────────────────────────────
+function buildWatchlist() {
+  const panel  = $('watchlist-panel');
+  const search = $('search-input');
+  if (!panel || !state.signals.length) return;
+
+  const groups = [
+    { key: 'BREAKOUT', label: 'Breakout', dot: 'dot-breakout' },
+    { key: 'NEAR',     label: 'Near',     dot: 'dot-near'     },
+    { key: 'WAIT',     label: 'Wait',     dot: 'dot-wait'     },
+  ];
+
+  const query = (search ? search.value.trim().toLowerCase() : '');
+
+  // merge snap prices into signals
+  const rows = state.signals.map(r => ({
+    ...r,
+    _close: state.snap[r.symbol]?.close ?? r.prev_close,
+    _chg:   state.snap[r.symbol]?.change_rate ?? null,
+  }));
+
+  const byStatus = {};
+  for (const g of groups) byStatus[g.key] = [];
+  for (const r of rows) {
+    const st = r.status || 'WAIT';
+    if (!byStatus[st]) byStatus[st] = [];
+    byStatus[st].push(r);
+  }
+
+  panel.innerHTML = '';
+
+  for (const g of groups) {
+    const items = byStatus[g.key] || [];
+    if (!items.length) continue;
+
+    const grp = document.createElement('div');
+    grp.className = 'wl-group';
+    grp.innerHTML = `<div class="wl-group-header"><span class="wl-group-dot ${g.dot}"></span>${g.label} (${items.length})</div>`;
+
+    for (const r of items) {
+      const show = !query || r.symbol.includes(query);
+      const chgPct = r._chg;
+      const chgStr = chgPct != null ? `${sign(chgPct)}${fmt2(chgPct)}%` : '—';
+      const chgCls = chgPct != null ? pctClass(chgPct) : 'chg-flat';
+      const badgeCls = r.status === 'BREAKOUT' ? 'badge-breakout' : r.status === 'NEAR' ? 'badge-near' : 'badge-wait';
+      const badgeTxt = r.status === 'BREAKOUT' ? '▲' : r.status === 'NEAR' ? '~' : '';
+
+      const row = document.createElement('div');
+      row.className = `wl-row${state.active === r.symbol ? ' active' : ''}${show ? '' : ' hidden'}`;
+      row.dataset.symbol = r.symbol;
+      row.innerHTML = `
+        <span class="wl-sym">${r.symbol}</span>
+        <span class="wl-price">${fmt2(r._close)}</span>
+        <span class="wl-chg ${chgCls}">${chgStr}</span>
+        ${badgeTxt ? `<span class="wl-badge ${badgeCls}">${badgeTxt}</span>` : ''}
+      `;
+      row.addEventListener('click', () => selectSymbol(r.symbol));
+      grp.appendChild(row);
+    }
+
+    panel.appendChild(grp);
+  }
+}
+
+// ── Symbol selection ───────────────────────────────────────────
+function selectSymbol(symbol) {
+  state.active = symbol;
+  buildWatchlist();
+  updateTableActiveRow();
+  loadChart(symbol);
+  updateChartHeader(symbol);
+}
+
+function updateChartHeader(symbol) {
+  $('chart-symbol').textContent = symbol;
+  const sn = state.snap[symbol];
+  const sg = state.signals.find(r => r.symbol === symbol);
+  const close = sn?.close ?? sg?.prev_close;
+  const rate  = sn?.change_rate ?? sg?.chg_pct;
+
+  if (close != null) {
+    $('chart-price').textContent = fmt2(close);
+    $('chart-price').className = 'chart-price ' + (rate > 0 ? 'td-up' : rate < 0 ? 'td-down' : '');
+  } else {
+    $('chart-price').textContent = '';
+  }
+  if (rate != null) {
+    $('chart-change').textContent = `${sign(rate)}${fmt2(rate)}%`;
+    $('chart-change').className = 'chart-chg ' + pctClass(rate);
+  } else {
+    $('chart-change').textContent = '';
+  }
+}
+
+// ── Chart ──────────────────────────────────────────────────────
+function loadChart(symbol) {
+  const end   = new Date().toISOString().slice(0, 10);
+  const start = new Date(Date.now() - state.chartDays * 86400000 * 1.5)
+                  .toISOString().slice(0, 10);
+
+  const url = `/api/twse/daily?symbol=${symbol}&start=${start}&end=${end}&limit=${state.chartDays + 60}`;
+
+  fetch(url)
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(data => renderChart(data.rows || [], symbol))
+    .catch(e => {
+      const hint = $('chart-hint');
+      if (hint) hint.textContent = `載入失敗 (${symbol}): ${e}`;
+    });
+}
+
+function renderChart(rows, symbol) {
+  const container = $('chart-container');
+  const hint = $('chart-hint');
   if (!container) return;
 
-  if (typeof LightweightCharts === "undefined") {
-    if (hint) {
-      hint.textContent =
-        "圖表程式未載入（請確認可連線 unpkg）。已於下方表格顯示相同日線資料。";
-    }
+  if (typeof LightweightCharts === 'undefined') {
+    if (hint) hint.textContent = '圖表庫未載入（需連線 CDN）';
     return;
   }
 
-  if (chartResizeObserver) {
-    chartResizeObserver.disconnect();
-    chartResizeObserver = null;
-  }
-  if (chartInstance) {
-    chartInstance.remove();
-    chartInstance = null;
-  }
+  // clean up previous chart
+  if (state.resizeObs) { state.resizeObs.disconnect(); state.resizeObs = null; }
+  if (state.chart) { state.chart.remove(); state.chart = null; }
+  container.innerHTML = '';
 
-  container.replaceChildren();
+  const candles = rows
+    .map(r => ({
+      time:  String(r.date).slice(0, 10),
+      open:  +r.open, high: +r.high, low: +r.low, close: +r.close,
+    }))
+    .filter(c => [c.open, c.high, c.low, c.close].every(Number.isFinite))
+    .sort((a, b) => a.time < b.time ? -1 : 1);
 
-  const w = Math.max(120, container.clientWidth);
-  const h = Math.max(200, container.clientHeight || 400);
+  const volumes = rows
+    .map(r => ({
+      time:  String(r.date).slice(0, 10),
+      value: +r.volume,
+      color: (+r.close >= +r.open) ? 'rgba(8,153,129,0.4)' : 'rgba(242,54,69,0.4)',
+    }))
+    .filter(v => Number.isFinite(v.value))
+    .sort((a, b) => a.time < b.time ? -1 : 1);
+
+  if (!candles.length) {
+    if (hint) hint.textContent = `${symbol}: 無歷史資料（TWSE STOCK_DAY）`;
+    return;
+  }
 
   const chart = LightweightCharts.createChart(container, {
-    width: w,
-    height: h,
     layout: {
-      background: { type: LightweightCharts.ColorType.Solid, color: "#131722" },
-      textColor: "#d1d4dc",
+      background: { type: LightweightCharts.ColorType.Solid, color: '#131722' },
+      textColor: '#d1d4dc',
       fontSize: 11,
     },
     grid: {
-      vertLines: { color: "rgba(54, 58, 69, 0.6)" },
-      horzLines: { color: "rgba(54, 58, 69, 0.6)" },
+      vertLines: { color: 'rgba(54,58,69,0.5)' },
+      horzLines: { color: 'rgba(54,58,69,0.5)' },
     },
     rightPriceScale: {
-      borderColor: "#363a45",
-      scaleMargins: { top: 0.08, bottom: 0.12 },
+      borderColor: '#363a45',
+      scaleMargins: { top: 0.06, bottom: 0.28 },
     },
     timeScale: {
-      borderColor: "#363a45",
+      borderColor: '#363a45',
       timeVisible: true,
       secondsVisible: false,
     },
     crosshair: {
-      vertLine: { color: "#758696", width: 1, style: 2 },
-      horzLine: { color: "#758696", width: 1, style: 2 },
+      vertLine: { color: '#758696', width: 1, style: 2 },
+      horzLine: { color: '#758696', width: 1, style: 2 },
     },
+    width: container.clientWidth,
+    height: container.clientHeight || 320,
   });
 
-  const series = chart.addCandlestickSeries({
-    upColor: "#089981",
-    downColor: "#f23645",
-    borderDownColor: "#f23645",
-    borderUpColor: "#089981",
-    wickDownColor: "#f23645",
-    wickUpColor: "#089981",
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#089981', downColor: '#f23645',
+    borderUpColor: '#089981', borderDownColor: '#f23645',
+    wickUpColor: '#089981',   wickDownColor: '#f23645',
   });
+  candleSeries.setData(candles);
 
-  series.setData(candles);
+  const volSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' },
+    priceScaleId: 'vol',
+  });
+  chart.priceScale('vol').applyOptions({
+    scaleMargins: { top: 0.78, bottom: 0 },
+    borderVisible: false,
+  });
+  volSeries.setData(volumes);
+
   chart.timeScale().fitContent();
-  chartInstance = chart;
+  state.chart = chart;
 
-  chartResizeObserver = new ResizeObserver((entries) => {
+  state.resizeObs = new ResizeObserver(entries => {
     for (const ent of entries) {
-      const cr = ent.contentRect;
-      const nw = Math.max(120, Math.floor(cr.width));
-      const nh = Math.max(200, Math.floor(cr.height));
-      chart.applyOptions({ width: nw, height: nh });
+      const { width, height } = ent.contentRect;
+      chart.applyOptions({ width: Math.max(120, width), height: Math.max(120, height) });
     }
   });
-  chartResizeObserver.observe(container);
+  state.resizeObs.observe(container);
 
   if (hint) {
-    hint.textContent = `共 ${candles.length} 個交易日（TWSE STOCK_DAY）。可拖曳平移、滾輪縮放時間軸。`;
+    hint.textContent = `${symbol} · ${candles.length} 個交易日 · 拖曳平移，滾輪縮放`;
   }
 }
 
-function showLoadError(el, hintEl, message) {
-  if (el) el.textContent = message;
-  if (hintEl) hintEl.textContent = message;
+// ── Signals table ──────────────────────────────────────────────
+function buildTable() {
+  const tbody = $('sig-tbody');
+  if (!tbody) return;
+
+  // merge snap into signals
+  const rows = state.signals.map(r => {
+    const sn = state.snap[r.symbol];
+    return {
+      ...r,
+      _close:   sn?.close        ?? r.prev_close,
+      _open:    sn?.open         ?? null,
+      _chgPct:  sn?.change_rate  ?? r.chg_pct,
+      _volume:  sn?.volume       ?? null,
+    };
+  });
+
+  // sort
+  const col = state.sortCol;
+  rows.sort((a, b) => {
+    let va = a[col] ?? a['_' + col] ?? 0;
+    let vb = b[col] ?? b['_' + col] ?? 0;
+    if (typeof va === 'string') va = va.localeCompare(vb);
+    else va = va - vb;
+    return state.sortAsc ? va : -va;
+  });
+
+  tbody.innerHTML = '';
+  for (const r of rows) {
+    const isActive = r.symbol === state.active;
+    const chgCls   = pctClass(r._chgPct);
+    const gapCls   = r.gap_pct < 0 ? 'td-up' : r.gap_pct > 0 ? 'td-down' : 'td-flat';
+
+    const tr = document.createElement('tr');
+    if (isActive) tr.className = 'active';
+    tr.dataset.symbol = r.symbol;
+    tr.innerHTML = `
+      <td class="col-sym">${r.symbol}</td>
+      <td>${r._open != null ? fmt2(r._open) : '—'}</td>
+      <td>${fmt2(r._close)}</td>
+      <td class="${chgCls}">${r._chgPct != null ? sign(r._chgPct) + fmt2(r._chgPct) + '%' : '—'}</td>
+      <td>${r._volume != null ? fmtK(r._volume) : '—'}</td>
+      <td>${fmt2(r.high_20d)}</td>
+      <td class="${gapCls}">${sign(r.gap)}${fmt2(r.gap)}</td>
+      <td class="${gapCls}">${sign(r.gap_pct)}${fmt2(r.gap_pct)}%</td>
+      <td>${statusPill(r.status)}</td>
+    `;
+    tr.addEventListener('click', () => selectSymbol(r.symbol));
+    tbody.appendChild(tr);
+  }
 }
 
-(function loadTwseDailyAndChart() {
-  const el = document.getElementById("twse-quote");
-  const titleEl = document.getElementById("chart-title");
-  const hint = document.getElementById("chart-hint");
+function updateTableActiveRow() {
+  document.querySelectorAll('#sig-tbody tr').forEach(tr => {
+    tr.classList.toggle('active', tr.dataset.symbol === state.active);
+  });
+}
 
-  const start = new Date();
-  start.setFullYear(start.getFullYear() - 2);
-  const startStr = start.toISOString().slice(0, 10);
-  const symbol = "2330";
-  const url = `/api/twse/daily?symbol=${symbol}&start=${encodeURIComponent(startStr)}&limit=520`;
-
-  fetch(url)
-    .then(async (r) => {
-      if (r.status === 404) {
-        throw new Error(
-          "偵測不到 /api/twse/daily（404）。請在**專案根目錄**執行：py -3 -m t9fox.cli serve（或 t9fox serve），再用 http://127.0.0.1:8765/ 開啟。不要只用 cd web\\netflix-style 後執行 python -m http.server，該方式沒有資料 API。",
-        );
+// ── Table sort ─────────────────────────────────────────────────
+function initTableSort() {
+  document.querySelectorAll('.sig-table th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (state.sortCol === col) {
+        state.sortAsc = !state.sortAsc;
+      } else {
+        state.sortCol = col;
+        state.sortAsc = col === 'symbol' || col === 'status';
       }
-      const ct = r.headers.get("content-type") || "";
-      const raw = await r.text();
-      if (!r.ok) {
-        let detail = raw.slice(0, 240);
-        try {
-          const j = JSON.parse(raw);
-          if (j.error) detail = j.error;
-        } catch {
-          /* ignore */
-        }
-        throw new Error(`伺服器回應 ${r.status}：${detail || "無內容"}`);
-      }
-      if (!ct.includes("application/json")) {
-        throw new Error("回應不是 JSON。請確認使用 t9fox serve 開啟此頁。");
-      }
-      return JSON.parse(raw);
-    })
-    .then((data) => {
-      if (!data.rows?.length) {
-        const msg =
-          "證交所回傳 0 筆日線：可能區間內無資料、證交所暫時無法連線，或網路/封鎖導致。可試 CLI：py -3 -m t9fox.cli fetch 2330 --start 2024-01-01。若快取異常可加 API 參數 refresh=1 重抓。";
-        showLoadError(el, hint, msg);
-        return;
-      }
-
-      if (titleEl) {
-        titleEl.textContent = `${data.symbol} · 日線 OHLC（證交所歷史 · ${data.rows.length} 筆）`;
-      }
-
-      const last = data.rows[data.rows.length - 1];
-      const first = data.rows[0];
-      const prev = data.rows.length >= 2 ? data.rows[data.rows.length - 2] : null;
-      const close = Number(last.close);
-      const prevClose = prev != null ? Number(prev.close) : null;
-      const dAbs = prevClose != null ? close - prevClose : null;
-      const dPct = prevClose != null && prevClose !== 0 ? (100 * (close - prevClose)) / prevClose : null;
-
-      if (el) {
-        const base = document.createElement("span");
-        base.textContent = `證交所日線 ${data.symbol}　最新 ${close.toLocaleString("zh-TW")}（${String(last.date).slice(0, 10)}）　區間 ${String(first.date).slice(0, 10)}～${String(last.date).slice(0, 10)}　${data.rows.length} 筆　TWSE STOCK_DAY`;
-
-        el.replaceChildren(base);
-
-        if (dAbs != null && dPct != null && Number.isFinite(dAbs) && Number.isFinite(dPct)) {
-          const sign = dAbs >= 0 ? "+" : "";
-          const ch = document.createElement("span");
-          ch.className = dAbs >= 0 ? "tv-up" : "tv-down";
-          ch.textContent = ` ${sign}${dAbs.toLocaleString("zh-TW", { maximumFractionDigits: 2 })} (${sign}${dPct.toFixed(2)}%)`;
-          el.appendChild(ch);
-        }
-      }
-
-      fillOhlcTable(data.rows, 25);
-
-      const candles = rowsToCandles(data.rows);
-      if (candles.length) {
-        try {
-          renderCandleChart(candles);
-        } catch (e) {
-          console.error(e);
-          if (hint) {
-            hint.textContent = `K 線繪製失敗：${e instanceof Error ? e.message : String(e)}。下方表格仍有原始資料。`;
-          }
-        }
-      }
-    })
-    .catch((e) => {
-      console.error(e);
-      const msg =
-        e instanceof Error
-          ? e.message
-          : `無法載入：${String(e)}。請確認已用 t9fox serve 啟動，並可開啟 http://127.0.0.1:8765/api/health 看到 ok: true。`;
-      showLoadError(el, hint, msg);
+      document.querySelectorAll('.sig-table th').forEach(t => {
+        t.classList.remove('sort-asc', 'sort-desc');
+      });
+      th.classList.add(state.sortAsc ? 'sort-asc' : 'sort-desc');
+      buildTable();
     });
-})();
+  });
+  // default sort indicator
+  const defTh = document.querySelector('.sig-table th[data-col="gap_pct"]');
+  if (defTh) defTh.classList.add('sort-asc');
+}
 
-document.querySelectorAll(".row__track").forEach((track) => {
-  track.addEventListener(
-    "wheel",
-    (e) => {
-      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-      if (track.scrollWidth <= track.clientWidth) return;
-      e.preventDefault();
-      track.scrollLeft += e.deltaY;
-    },
-    { passive: false },
-  );
-});
+// ── Time-frame buttons ─────────────────────────────────────────
+function initTfButtons() {
+  document.querySelectorAll('.tf-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('tf-btn--active'));
+      btn.classList.add('tf-btn--active');
+      state.chartDays = +btn.dataset.days;
+      if (state.active) loadChart(state.active);
+    });
+  });
+}
+
+// ── Search ─────────────────────────────────────────────────────
+function initSearch() {
+  const inp = $('search-input');
+  if (!inp) return;
+  inp.addEventListener('input', () => buildWatchlist());
+}
+
+// ── Data fetching ──────────────────────────────────────────────
+async function fetchSignals() {
+  const today = new Date().toISOString().slice(0, 10);
+  const res   = await fetch(`/api/signals?date=${today}`);
+  const data  = await res.json();
+  state.signals = (data.rows || []).sort((a, b) => a.gap_pct - b.gap_pct);
+
+  const dateEl = $('table-date');
+  if (dateEl) dateEl.textContent = data.date || today;
+}
+
+async function fetchSnapshot(showLoading = true) {
+  const btn = $('btn-refresh');
+  if (showLoading && btn) { btn.textContent = '⟳ 載入中…'; btn.classList.add('loading'); }
+
+  try {
+    const res  = await fetch('/api/snapshot');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    state.snap = {};
+    for (const r of (data.rows || [])) {
+      state.snap[r.symbol] = r;
+    }
+
+    buildWatchlist();
+    buildTable();
+    if (state.active) updateChartHeader(state.active);
+    setLastUpdate(data.source || 'sinopac');
+  } catch (e) {
+    console.warn('Snapshot failed:', e.message);
+    setLastUpdate('DB only');
+  } finally {
+    if (btn) { btn.textContent = '⟳ 刷新'; btn.classList.remove('loading'); }
+  }
+}
+
+// ── Nav tab switching (placeholder) ───────────────────────────
+function initNavTabs() {
+  document.querySelectorAll('.nav-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('nav-tab--active'));
+      tab.classList.add('nav-tab--active');
+    });
+  });
+}
+
+// ── Boot ───────────────────────────────────────────────────────
+async function boot() {
+  initNavTabs();
+  initTableSort();
+  initTfButtons();
+  initSearch();
+
+  $('btn-refresh')?.addEventListener('click', () => fetchSnapshot(true));
+
+  // load signals from DB first (instant)
+  try {
+    await fetchSignals();
+    buildWatchlist();
+    buildTable();
+  } catch (e) {
+    console.error('Signals load failed:', e);
+  }
+
+  // then try live snapshot in background
+  fetchSnapshot(false);
+
+  // auto-refresh every 90 seconds during market hours
+  setInterval(() => {
+    const now = new Date();
+    const h = now.getHours(), m = now.getMinutes();
+    const inMarket = (h > 8 || (h === 8 && m >= 55)) && (h < 13 || (h === 13 && m <= 35));
+    if (inMarket) fetchSnapshot(false);
+  }, 90_000);
+}
+
+document.addEventListener('DOMContentLoaded', boot);
