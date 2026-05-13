@@ -515,15 +515,15 @@ def run_ma_breakout_watchlist(
         t._traded_today = traded_today
 
     # ── 訂單成交回報 callback：確認買單成交才建倉 ─────────────────────
-    @broker.api.on_order_state_change()
     def _on_order_state(stat, msg):
         import shioaji.constant as sc  # type: ignore[import]
         try:
-            trade    = msg["trade"]
-            order_id = trade["order"]["id"]
+            # shioaji 實際格式：msg 頂層直接有 "order"，無 "trade" 包層
+            order_id = msg["order"]["id"]
 
             if stat == sc.OrderState.StockDeal:
-                for deal in trade.get("deals", []):
+                # 成交：deals 陣列在頂層
+                for deal in msg.get("deals", []):
                     fill_price = float(deal["price"])
                     fill_qty   = int(deal["quantity"])
                     for t in traders.values():
@@ -531,13 +531,16 @@ def run_ma_breakout_watchlist(
                         t._on_sell_fill(order_id)                    # 賣單成交
 
             elif stat == sc.OrderState.StockOrder:
-                status = trade.get("order", {}).get("status", "")
-                if status in ("Failed", "Cancelled"):
+                # op_code 88 = 新單，其他代碼可能是失敗/取消
+                op_code = msg.get("operation", {}).get("op_code", "")
+                if op_code not in ("00", "88"):   # 非正常新單 → 視為失敗
                     for t in traders.values():
-                        t._on_order_failed(order_id)                 # 買單拒絕/取消
+                        t._on_order_failed(order_id)
 
         except Exception as e:
             _log("order_cb", f"parse error: {e}", error=True)
+
+    broker.api.set_order_callback(_on_order_state)
 
     # ── 單一共用 tick callback，依 code 派送給對應 trader ─────────────
     @broker.api.on_tick_stk_v1()
