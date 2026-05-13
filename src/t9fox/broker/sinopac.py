@@ -9,31 +9,45 @@ from t9fox.broker.credentials import SinopacCredentials
 if TYPE_CHECKING:
     import shioaji as sj  # type: ignore[import]
 
+# ── Shioaji v1.3 API reference (inspected from installed package) ──────────
+# Shioaji(simulation=False)
+# login(api_key, secret_key, fetch_contract=True, subscribe_trade=True, receive_window=30000)
+# activate_ca(ca_path, ca_passwd, person_id='', store=0) -> bool
+# place_order(contract, order, timeout=5000) -> Trade
+# snapshots([contract, ...]) -> [Snapshot]
+# list_positions(account, unit=Unit.Common) -> [StockPosition]
+#
+# StockPosition fields: code, quantity(lots), price(avg), last_price, pnl, direction
+# Snapshot fields: code, open, high, low, close, volume, buy_price, sell_price, ...
+# Order(price, quantity(lots), action, price_type, order_type, order_lot, account)
+
 
 @dataclass
 class OrderResult:
     symbol: str
-    action: str      # "buy" | "sell"
-    quantity: int    # shares
+    action: str       # "Buy" | "Sell"
+    lots: int
     price: float
-    status: str      # from Shioaji trade status
+    status: str
     order_id: str
 
 
 @dataclass
 class Position:
     symbol: str
-    quantity: int    # shares (lots × 1000)
+    lots: int         # 張數
+    shares: int       # 股數（lots × 1000）
     avg_price: float
+    last_price: float
     pnl: float
 
 
 class SinopacBroker:
     """
-    Wraps Shioaji API.
+    Wraps Shioaji v1.x.
 
-    simulation=True  → real credentials, real quotes, simulated orders
-    simulation=False → real credentials, real quotes, real orders (live)
+    simulation=True  → real credentials + real quotes + simulated orders
+    simulation=False → real credentials + real quotes + real orders (live)
     CA required for any order placement.
     """
 
@@ -57,7 +71,7 @@ class SinopacBroker:
             import shioaji as sj  # type: ignore[import]
         except ModuleNotFoundError:
             raise ModuleNotFoundError(
-                "shioaji not installed. Run: pip install -e \".[sinopac]\""
+                'shioaji not installed. Run: pip install -e ".[sinopac]"'
             )
 
         mode = "simulation" if self.creds.simulation else "LIVE"
@@ -68,18 +82,19 @@ class SinopacBroker:
             api_key=self.creds.api_key,
             secret_key=self.creds.secret_key,
             fetch_contract=True,
+            subscribe_trade=True,
         )
         print(f"[sinopac] Logged in. Accounts: {[str(a) for a in accounts]}", file=sys.stderr)
 
         if self.creds.has_ca:
-            self._api.activate_ca(
+            ok = self._api.activate_ca(
                 ca_path=str(self.creds.ca_path),
                 ca_passwd=self.creds.ca_passwd,
-                person_id=self.creds.person_id,
+                person_id=self.creds.person_id or "",
             )
-            print("[sinopac] CA activated.", file=sys.stderr)
+            print(f"[sinopac] CA activated: {ok}", file=sys.stderr)
         else:
-            print("[sinopac] CA not provided — data-only mode (no order placement).", file=sys.stderr)
+            print("[sinopac] No CA — data-only mode (order placement unavailable).", file=sys.stderr)
 
     def logout(self) -> None:
         if self._api is not None:
@@ -102,43 +117,48 @@ class SinopacBroker:
     # ── market data ────────────────────────────────────────────────────
 
     def get_snapshot(self, symbol: str) -> dict:
-        """Return latest snapshot (bid/ask/close/volume) for a stock."""
+        """Latest snapshot for a stock (close/OHLC/volume/bid/ask)."""
         contract = self.api.Contracts.Stocks[symbol]
-        snapshots = self.api.snapshots([contract])
-        if not snapshots:
+        snaps = self.api.snapshots([contract])
+        if not snaps:
             return {}
-        s = snapshots[0]
+        s = snaps[0]
         return {
             "symbol": symbol,
-            "close": s.close,
             "open": s.open,
             "high": s.high,
             "low": s.low,
+            "close": s.close,
             "volume": s.volume,
-            "bid_price": s.bid_price,
-            "ask_price": s.ask_price,
+            "total_volume": s.total_volume,
+            "buy_price": s.buy_price,
+            "sell_price": s.sell_price,
+            "change_price": s.change_price,
+            "change_rate": s.change_rate,
         }
 
     # ── positions ──────────────────────────────────────────────────────
 
     def list_positions(self) -> list[Position]:
-        """Return all open stock positions."""
+        """All open stock positions (quantity in lots AND shares)."""
         raw = self.api.list_positions(self.stock_account)
-        result: list[Position] = []
-        for p in raw:
-            result.append(Position(
+        return [
+            Position(
                 symbol=p.code,
-                quantity=p.quantity * 1000,   # lots → shares
+                lots=p.quantity,
+                shares=p.quantity * 1000,
                 avg_price=p.price,
+                last_price=p.last_price,
                 pnl=p.pnl,
-            ))
-        return result
+            )
+            for p in raw
+        ]
 
-    def get_position_shares(self, symbol: str) -> int:
-        """Return shares held for a symbol (0 if none)."""
+    def get_position_lots(self, symbol: str) -> int:
+        """Current lots held for a symbol (0 if none)."""
         for p in self.list_positions():
             if p.symbol == symbol:
-                return p.quantity
+                return p.lots
         return 0
 
     # ── orders ─────────────────────────────────────────────────────────
@@ -151,24 +171,25 @@ class SinopacBroker:
         price: float,
     ) -> OrderResult:
         """
-        Place a ROD limit order.
+        ROD limit order for a stock.
 
-        action: "buy" | "sell"
-        lots:   number of 張 (1 lot = 1000 shares)
-        price:  limit price in TWD
+        action : "Buy" | "Sell"
+        lots   : number of 張 (1 張 = 1000 shares)
+        price  : limit price TWD
         """
         if not self.creds.has_ca:
             raise RuntimeError("CA certificate required for order placement.")
         if lots <= 0:
-            raise ValueError(f"lots must be positive, got {lots}")
+            raise ValueError(f"lots must be > 0, got {lots}")
 
         import shioaji.constant as c  # type: ignore[import]
 
         contract = self.api.Contracts.Stocks[symbol]
+        act = c.Action.Buy if action.lower() == "buy" else c.Action.Sell
         order = self.api.Order(
             price=price,
             quantity=lots,
-            action=c.Action.Buy if action == "buy" else c.Action.Sell,
+            action=act,
             price_type=c.StockPriceType.LMT,
             order_type=c.OrderType.ROD,
             order_lot=c.StockOrderLot.Common,
@@ -178,7 +199,7 @@ class SinopacBroker:
         return OrderResult(
             symbol=symbol,
             action=action,
-            quantity=lots * 1000,
+            lots=lots,
             price=price,
             status=str(trade.status.status),
             order_id=trade.status.id,
