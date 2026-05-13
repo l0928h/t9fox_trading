@@ -386,6 +386,21 @@ class MaBreakoutDayTrader:
             self._stop.set()
             _log(self.symbol, f"SELL CONFIRMED  order={order_id}  position cleared")
 
+    def _on_order_failed(self, order_id: str) -> None:
+        """買單被交易所拒絕或取消 — 重置狀態，開放其他標的補進場。"""
+        with self._lock:
+            if order_id != self._pending_buy_order_id:
+                return
+            self._bought_today              = False
+            self._pending_buy_order_id      = None
+            self._pending_buy_filled_shares = 0
+            self._pending_buy_cost          = 0.0
+            if self._traded_today is not None:
+                self._traded_today.clear()
+            _log(self.symbol,
+                 f"Buy order {order_id} failed/cancelled — state reset, others may trade",
+                 error=True)
+
     def _on_fill(self, order_id: str, fill_price: float, fill_qty_shares: int) -> None:
         """訂單成交回報 — 累計所有 fill 事件，全部成交後確認倉位。"""
         with self._lock:
@@ -503,17 +518,24 @@ def run_ma_breakout_watchlist(
     @broker.api.on_order_state_change()
     def _on_order_state(stat, msg):
         import shioaji.constant as sc  # type: ignore[import]
-        if stat != sc.OrderState.StockDeal:
-            return
         try:
             trade    = msg["trade"]
             order_id = trade["order"]["id"]
-            for deal in trade.get("deals", []):
-                fill_price = float(deal["price"])
-                fill_qty   = int(deal["quantity"])
-                for t in traders.values():
-                    t._on_fill(order_id, fill_price, fill_qty)      # 買單成交
-                    t._on_sell_fill(order_id)                        # 賣單成交
+
+            if stat == sc.OrderState.StockDeal:
+                for deal in trade.get("deals", []):
+                    fill_price = float(deal["price"])
+                    fill_qty   = int(deal["quantity"])
+                    for t in traders.values():
+                        t._on_fill(order_id, fill_price, fill_qty)  # 買單成交
+                        t._on_sell_fill(order_id)                    # 賣單成交
+
+            elif stat == sc.OrderState.StockOrder:
+                status = trade.get("order", {}).get("status", "")
+                if status in ("Failed", "Cancelled"):
+                    for t in traders.values():
+                        t._on_order_failed(order_id)                 # 買單拒絕/取消
+
         except Exception as e:
             _log("order_cb", f"parse error: {e}", error=True)
 
