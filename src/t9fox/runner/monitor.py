@@ -189,14 +189,15 @@ class MaBreakoutDayTrader:
         self.lots            = lots
         self.sell_time       = datetime.time(*map(int, sell_time.split(":")))
 
-        self._lock          = threading.Lock()
-        self._bought_today  = False
-        self._position_lots = 0
-        self._buy_price     = 0.0
-        self._sold          = False
-        self._stop          = threading.Event()
-        self._open_px       = None   # 首 tick 作為開盤代理（跳空計算用）
-        self._traded_today  : threading.Event | None = None  # 共用旗標（watchlist 模式用）
+        self._lock                  = threading.Lock()
+        self._bought_today          = False
+        self._pending_buy_order_id  : str | None = None   # 已下單，等待成交回報
+        self._position_lots         = 0
+        self._buy_price             = 0.0
+        self._sold                  = False
+        self._stop                  = threading.Event()
+        self._open_px               = None   # 首 tick 作為開盤代理（跳空計算用）
+        self._traded_today          : threading.Event | None = None  # 共用旗標
 
         # 盤前可確認的條件
         self._condition_ok = (
@@ -336,16 +337,16 @@ class MaBreakoutDayTrader:
         )
         try:
             result = broker.place_stock_order(self.symbol, "Buy", self.lots, price)
-            self._bought_today  = True
-            self._position_lots = self.lots
-            self._buy_price     = price
-            _log(self.symbol, f"Order sent  id={result.order_id}  status={result.status}")
+            self._bought_today         = True          # 防止重複下單
+            self._pending_buy_order_id = result.order_id  # 等成交回報才設倉位
+            _log(self.symbol, f"Order sent  id={result.order_id}  status={result.status}"
+                              f"  (awaiting fill)")
             _save_trade(self.symbol, "Buy", self.lots, price,
                         result.order_id, result.status, broker.creds.simulation,
                         strategy="ma_breakout_s3")
             if self._traded_today is not None:
                 self._traded_today.set()
-                _log(self.symbol, "今日已成交，其他標的停止進場")
+                _log(self.symbol, "今日已下單，其他標的停止進場")
         except Exception as e:
             _log(self.symbol, f"BUY ERROR: {e}", error=True)
 
@@ -369,6 +370,20 @@ class MaBreakoutDayTrader:
             self._stop.set()
         except Exception as e:
             _log(self.symbol, f"SELL ERROR: {e}", error=True)
+
+    def _on_fill(self, order_id: str, fill_price: float, fill_qty_shares: int) -> None:
+        """訂單成交回報 — 確認買單成交後才建立倉位。"""
+        with self._lock:
+            if order_id != self._pending_buy_order_id or self._position_lots > 0:
+                return
+            fill_lots = fill_qty_shares // 1000
+            if fill_lots <= 0:
+                return
+            self._position_lots        = fill_lots
+            self._buy_price            = fill_price
+            self._pending_buy_order_id = None
+            _log(self.symbol,
+                 f"FILLED  {fill_lots}lot @ {fill_price:.2f}  position confirmed")
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -457,6 +472,23 @@ def run_ma_breakout_watchlist(
     traded_today = threading.Event()
     for t in traders.values():
         t._traded_today = traded_today
+
+    # ── 訂單成交回報 callback：確認買單成交才建倉 ─────────────────────
+    @broker.api.on_order_state_change()
+    def _on_order_state(stat, msg):
+        import shioaji.constant as sc  # type: ignore[import]
+        if stat != sc.OrderState.StockDeal:
+            return
+        try:
+            trade    = msg["trade"]
+            order_id = trade["order"]["id"]
+            for deal in trade.get("deals", []):
+                fill_price = float(deal["price"])
+                fill_qty   = int(deal["quantity"])
+                for t in traders.values():
+                    t._on_fill(order_id, fill_price, fill_qty)
+        except Exception as e:
+            _log("order_cb", f"parse error: {e}", error=True)
 
     # ── 單一共用 tick callback，依 code 派送給對應 trader ─────────────
     @broker.api.on_tick_stk_v1()
