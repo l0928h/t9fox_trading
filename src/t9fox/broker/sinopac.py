@@ -54,6 +54,7 @@ class SinopacBroker:
     def __init__(self, creds: SinopacCredentials):
         self.creds = creds
         self._api: "sj.Shioaji | None" = None
+        self._stock_account = None
 
     # ── context manager ────────────────────────────────────────────────
 
@@ -86,6 +87,16 @@ class SinopacBroker:
         )
         print(f"[sinopac] Logged in. Accounts: {[str(a) for a in accounts]}", file=sys.stderr)
 
+        # Explicitly pick the stock account (StockAccount type, broker_id H = securities)
+        from shioaji.account import StockAccount  # type: ignore[import]
+        for acc in accounts:
+            if isinstance(acc, StockAccount):
+                self._stock_account = acc
+                break
+        if self._stock_account is None and accounts:
+            self._stock_account = accounts[0]
+        print(f"[sinopac] Stock account: {self._stock_account}", file=sys.stderr)
+
         if self.creds.has_ca:
             ok = self._api.activate_ca(
                 ca_path=str(self.creds.ca_path),
@@ -112,6 +123,8 @@ class SinopacBroker:
 
     @property
     def stock_account(self):
+        if self._stock_account is not None:
+            return self._stock_account
         return self.api.stock_account
 
     # ── market data ────────────────────────────────────────────────────
