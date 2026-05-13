@@ -124,6 +124,8 @@ class BreakoutDayTrader:
             self._position_lots = self.lots
             self._buy_price     = price
             _log(self.symbol, f"Order sent  id={result.order_id}  status={result.status}")
+            _save_trade(self.symbol, "Buy", self.lots, price,
+                        result.order_id, result.status, broker.creds.simulation)
         except Exception as e:
             _log(self.symbol, f"BUY ERROR: {e}", error=True)
 
@@ -137,6 +139,8 @@ class BreakoutDayTrader:
         )
         try:
             result = broker.place_stock_order(self.symbol, "Sell", self._position_lots, price)
+            _save_trade(self.symbol, "Sell", self._position_lots, price,
+                        result.order_id, result.status, broker.creds.simulation)
             self._position_lots = 0
             self._sold          = True
             _log(self.symbol, f"Order sent  id={result.order_id}  status={result.status}")
@@ -151,3 +155,18 @@ def _log(symbol: str, msg: str, *, error: bool = False) -> None:
     ts  = datetime.datetime.now().strftime("%H:%M:%S")
     out = sys.stderr if error else sys.stdout
     print(f"[{ts}][{symbol}] {msg}", file=out)
+
+
+def _save_trade(
+    symbol: str, action: str, lots: int, price: float,
+    order_id: str, order_status: str, simulation: bool,
+) -> None:
+    try:
+        from t9fox.db.store import insert_trade
+        insert_trade(
+            date=datetime.date.today().isoformat(),
+            symbol=symbol, action=action, lots=lots, price=price,
+            order_id=order_id, order_status=order_status, simulation=simulation,
+        )
+    except Exception as e:
+        _log(symbol, f"DB write failed: {e}", error=True)

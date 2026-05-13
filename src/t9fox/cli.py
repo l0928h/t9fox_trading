@@ -7,6 +7,36 @@ from t9fox.data.twse_daily import load_or_fetch_daily_bars
 from t9fox.strategy.ma_crossover import MaCrossParams, ma_crossover_targets
 
 
+def _cmd_report(args: argparse.Namespace) -> int:
+    from t9fox.db.store import query_signals, query_trades
+
+    if args.type == "signals":
+        rows = query_signals(date=args.date, symbol=args.symbol,
+                             status=args.status, limit=args.limit)
+        if not rows:
+            print("No signals found.")
+            return 0
+        print(f"\n{'Date':10s}  {'Symbol':6s}  {'Close':>8s}  {'20d-High':>8s}  {'Gap%':>7s}  Status")
+        print(f"{'─'*10}  {'─'*6}  {'─'*8}  {'─'*8}  {'─'*7}  {'─'*15}")
+        for r in rows:
+            print(f"{r['date']:10s}  {r['symbol']:6s}  {r['prev_close']:>8.2f}  "
+                  f"{r['high_20d']:>8.2f}  {r['gap_pct']:>+6.1f}%  {r['status']}")
+    else:
+        rows = query_trades(symbol=args.symbol, date=args.date, limit=args.limit)
+        if not rows:
+            print("No trades found.")
+            return 0
+        print(f"\n{'Date':10s}  {'Symbol':6s}  {'Action':5s}  {'Lots':>4s}  "
+              f"{'Price':>8s}  {'Sim':>3s}  Status")
+        print(f"{'─'*10}  {'─'*6}  {'─'*5}  {'─'*4}  {'─'*8}  {'─'*3}  {'─'*12}")
+        for r in rows:
+            sim = "Yes" if r["simulation"] else "No"
+            print(f"{r['date']:10s}  {r['symbol']:6s}  {r['action']:5s}  "
+                  f"{r['lots']:>4d}  {r['price']:>8.2f}  {sim:>3s}  {r['order_status']}")
+    print()
+    return 0
+
+
 def _cmd_fetch_all(args: argparse.Namespace) -> int:
     from t9fox.runner.precheck import load_watchlist
     from t9fox.data.twse_daily import load_or_fetch_daily_bars
@@ -251,6 +281,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--slow", type=int, default=30)
     b.add_argument("--refresh", action="store_true")
     b.set_defaults(func=_cmd_backtest)
+
+    rp = sub.add_parser("report", help="Query DB: signal history or trade log")
+    rp.add_argument("type", choices=["signals", "trades"], help="Report type")
+    rp.add_argument("--symbol", default=None)
+    rp.add_argument("--date",   default=None, help="YYYY-MM-DD")
+    rp.add_argument("--status", default=None, help="BREAKOUT | NEAR | WAIT (signals only)")
+    rp.add_argument("--limit",  type=int, default=100)
+    rp.set_defaults(func=_cmd_report)
 
     fa = sub.add_parser("fetch-all", help="Bulk-fetch TWSE daily data for all symbols in watchlist")
     fa.add_argument("--file", default=None, metavar="FILE", help="Watchlist file (default: watchlist.txt)")
