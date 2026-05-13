@@ -34,6 +34,34 @@ def _cmd_connect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_price(args: argparse.Namespace) -> int:
+    from t9fox.broker.credentials import SinopacCredentials
+    from t9fox.broker.sinopac import SinopacBroker
+
+    try:
+        creds = SinopacCredentials.from_env()
+    except (EnvironmentError, FileNotFoundError) as e:
+        print(f"Credential error: {e}", file=sys.stderr)
+        return 1
+
+    with SinopacBroker(creds) as broker:
+        for symbol in args.symbols:
+            snap = broker.get_snapshot(symbol.strip())
+            if not snap:
+                print(f"{symbol}: no data")
+                continue
+            chg = snap["change_price"]
+            chg_pct = snap["change_rate"]
+            sign = "+" if chg >= 0 else ""
+            print(
+                f"{symbol:6s}  close {snap['close']:8.2f}  "
+                f"chg {sign}{chg:.2f} ({sign}{chg_pct:.2f}%)  "
+                f"bid {snap['buy_price']:.2f} / ask {snap['sell_price']:.2f}  "
+                f"vol {snap['total_volume']:,}"
+            )
+    return 0
+
+
 def _cmd_fetch(args: argparse.Namespace) -> int:
     df = load_or_fetch_daily_bars(
         args.symbol,
@@ -122,6 +150,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--slow", type=int, default=30)
     b.add_argument("--refresh", action="store_true")
     b.set_defaults(func=_cmd_backtest)
+
+    pr = sub.add_parser("price", help="Query real-time snapshot (close/change/bid/ask) via Sinopac")
+    pr.add_argument("symbols", nargs="+", help="Stock code(s), e.g. 2330 2454 0050")
+    pr.set_defaults(func=_cmd_price)
 
     cn = sub.add_parser("connect", help="Test Sinopac login, list positions, optionally get snapshot")
     cn.add_argument("--symbol", default=None, help="Stock code to snapshot, e.g. 2330")
