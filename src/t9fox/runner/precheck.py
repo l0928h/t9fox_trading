@@ -113,7 +113,7 @@ def run_precheck(symbols: list[str], lookback: int = 20) -> None:
     reports.sort(key=lambda r: r.gap)
 
     print(f"\n{'Symbol':6s}  {'Close':>8s}  {'Chg':>16s}  {'20d-High':>8s}  {'Gap':>14s}  Status")
-    print(f"{'─'*6}  {'─'*8}  {'─'*16}  {'─'*8}  {'─'*14}  {'─'*15}")
+    print(f"{'-'*6}  {'-'*8}  {'-'*16}  {'-'*8}  {'-'*14}  {'-'*15}")
 
     breakout_count = near_count = 0
     for r in reports:

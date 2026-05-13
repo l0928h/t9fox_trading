@@ -17,7 +17,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
             print("No signals found.")
             return 0
         print(f"\n{'Date':10s}  {'Symbol':6s}  {'Close':>8s}  {'20d-High':>8s}  {'Gap%':>7s}  Status")
-        print(f"{'─'*10}  {'─'*6}  {'─'*8}  {'─'*8}  {'─'*7}  {'─'*15}")
+        print(f"{'-'*10}  {'-'*6}  {'-'*8}  {'-'*8}  {'-'*7}  {'-'*15}")
         for r in rows:
             print(f"{r['date']:10s}  {r['symbol']:6s}  {r['prev_close']:>8.2f}  "
                   f"{r['high_20d']:>8.2f}  {r['gap_pct']:>+6.1f}%  {r['status']}")
@@ -28,7 +28,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
             return 0
         print(f"\n{'Date':10s}  {'Symbol':6s}  {'Action':5s}  {'Lots':>4s}  "
               f"{'Price':>8s}  {'Sim':>3s}  Status")
-        print(f"{'─'*10}  {'─'*6}  {'─'*5}  {'─'*4}  {'─'*8}  {'─'*3}  {'─'*12}")
+        print(f"{'-'*10}  {'-'*6}  {'-'*5}  {'-'*4}  {'-'*8}  {'-'*3}  {'-'*12}")
         for r in rows:
             sim = "Yes" if r["simulation"] else "No"
             print(f"{r['date']:10s}  {r['symbol']:6s}  {r['action']:5s}  "
@@ -166,8 +166,27 @@ def _cmd_connect(args: argparse.Namespace) -> int:
 
 
 def _cmd_price(args: argparse.Namespace) -> int:
+    from pathlib import Path
     from t9fox.broker.credentials import SinopacCredentials
     from t9fox.broker.sinopac import SinopacBroker
+    from t9fox.runner.precheck import load_watchlist
+
+    # resolve symbol list
+    if args.file:
+        symbols = load_watchlist(args.file)
+        if not symbols:
+            print(f"No symbols in {args.file}", file=sys.stderr)
+            return 1
+    elif args.symbols:
+        symbols = [s.strip() for s in args.symbols]
+    else:
+        default = Path(__file__).resolve().parents[2] / "watchlist.txt"
+        if default.is_file():
+            symbols = load_watchlist(default)
+            print(f"(Using {default})")
+        else:
+            print("Provide symbols, --file, or place watchlist.txt in project root.", file=sys.stderr)
+            return 1
 
     try:
         creds = SinopacCredentials.from_env()
@@ -176,20 +195,55 @@ def _cmd_price(args: argparse.Namespace) -> int:
         return 1
 
     with SinopacBroker(creds) as broker:
-        for symbol in args.symbols:
-            snap = broker.get_snapshot(symbol.strip())
-            if not snap:
-                print(f"{symbol}: no data")
+        contracts = [broker.api.Contracts.Stocks[s] for s in symbols]
+        try:
+            snaps = broker.api.snapshots(contracts)
+        except Exception as e:
+            print(f"Snapshot error: {e}", file=sys.stderr)
+            return 1
+
+        snap_map = {s.code: s for s in snaps}
+
+        # optionally merge today's signal data from DB (20d-high, gap%)
+        sig_map: dict[str, dict] = {}
+        try:
+            from t9fox.db.store import query_signals
+            import datetime
+            today = datetime.date.today().isoformat()
+            rows = query_signals(date=today, limit=len(symbols) + 10)
+            sig_map = {r["symbol"]: r for r in rows}
+        except Exception:
+            pass
+
+        has_sig = bool(sig_map)
+        hdr = f"{'Symbol':6s}  {'Close':>8s}  {'Chg':>14s}  {'Bid':>8s}  {'Ask':>8s}  {'Volume':>10s}"
+        if has_sig:
+            hdr += f"  {'20d-High':>8s}  {'Gap%':>7s}  Status"
+        print(f"\n{hdr}")
+        sep = f"{'-'*6}  {'-'*8}  {'-'*14}  {'-'*8}  {'-'*8}  {'-'*10}"
+        if has_sig:
+            sep += f"  {'-'*8}  {'-'*7}  {'-'*15}"
+        print(sep)
+
+        for symbol in symbols:
+            s = snap_map.get(symbol)
+            if not s:
+                print(f"{symbol:6s}  (no data)")
                 continue
-            chg = snap["change_price"]
-            chg_pct = snap["change_rate"]
+            chg = float(s.change_price)
+            chg_pct = float(s.change_rate)
             sign = "+" if chg >= 0 else ""
-            print(
-                f"{symbol:6s}  close {snap['close']:8.2f}  "
-                f"chg {sign}{chg:.2f} ({sign}{chg_pct:.2f}%)  "
-                f"bid {snap['buy_price']:.2f} / ask {snap['sell_price']:.2f}  "
-                f"vol {snap['total_volume']:,}"
+            chg_str = f"{sign}{chg:.2f}({sign}{chg_pct:.2f}%)"
+            line = (
+                f"{symbol:6s}  {float(s.close):>8.2f}  {chg_str:>14s}  "
+                f"{float(s.buy_price):>8.2f}  {float(s.sell_price):>8.2f}  "
+                f"{int(s.total_volume):>10,}"
             )
+            if has_sig and symbol in sig_map:
+                r = sig_map[symbol]
+                line += f"  {r['high_20d']:>8.2f}  {r['gap_pct']:>+6.1f}%  {r['status']}"
+            print(line)
+        print(f"\n{len(snap_map)} symbols")
     return 0
 
 
@@ -317,8 +371,9 @@ def main(argv: list[str] | None = None) -> int:
     mo.add_argument("--sell-time", default="13:20", help="Force-sell time HH:MM (default: 13:20)")
     mo.set_defaults(func=_cmd_monitor)
 
-    pr = sub.add_parser("price", help="Query real-time snapshot (close/change/bid/ask) via Sinopac")
-    pr.add_argument("symbols", nargs="+", help="Stock code(s), e.g. 2330 2454 0050")
+    pr = sub.add_parser("price", help="Query real-time snapshot for symbols or whole watchlist")
+    pr.add_argument("symbols", nargs="*", help="Stock code(s) (omit to use watchlist.txt)")
+    pr.add_argument("--file", default=None, metavar="FILE", help="Watchlist file (default: watchlist.txt)")
     pr.set_defaults(func=_cmd_price)
 
     cn = sub.add_parser("connect", help="Test Sinopac login, list positions, optionally get snapshot")
