@@ -111,7 +111,6 @@ def backtest_ma_breakout(
             condition_ok
             and open_px > maf_prev
             and close_prev < maf_prev
-            and np.isfinite(vol_ma_prev) and vol_today > vol_ma_prev
             and gap_pct < 3.0
         )
 

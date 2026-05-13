@@ -59,5 +59,5 @@ def calc_ma_breakout_signal(
         ma_slow=ma_slow,
         close_last=close_last,
         vol_ratio=vol_ratio,
-        condition_ok=ma_slow < ma_fast and close_last < ma_fast and vol_ratio > 1.0,
+        condition_ok=ma_slow < ma_fast and close_last < ma_fast,
     )

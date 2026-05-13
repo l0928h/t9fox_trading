@@ -196,11 +196,10 @@ class MaBreakoutDayTrader:
         self._open_px       = None   # 首 tick 作為開盤代理（跳空計算用）
         self._traded_today  : threading.Event | None = None  # 共用旗標（watchlist 模式用）
 
-        # 盤前可確認的三個條件
+        # 盤前可確認的條件
         self._condition_ok = (
             ma_slow < ma_fast
             and close_prev < ma_fast
-            and vol_ratio > 1.0
         )
 
     # ── public ─────────────────────────────────────────────────────────
