@@ -37,6 +37,7 @@ function setLastUpdate(src) {
   if (!el) return;
   const t = new Date().toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   el.textContent = `${t}  ${src}`;
+  el.classList.toggle('live', src === 'LIVE' || src === 'tick');
 }
 
 // ── Watchlist sidebar ──────────────────────────────────────────
@@ -353,29 +354,18 @@ async function fetchSignals() {
   const res   = await fetch(`/api/signals?date=${today}`);
   const data  = await res.json();
   state.signals = (data.rows || []).sort((a, b) => a.gap_pct - b.gap_pct);
-
   const dateEl = $('table-date');
   if (dateEl) dateEl.textContent = data.date || today;
 }
 
-async function fetchSnapshot(showLoading = true) {
+async function fetchSnapshot() {
   const btn = $('btn-refresh');
-  if (showLoading && btn) { btn.textContent = '⟳ 載入中…'; btn.classList.add('loading'); }
-
+  if (btn) { btn.textContent = '⟳ 載入中…'; btn.classList.add('loading'); }
   try {
     const res  = await fetch('/api/snapshot');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-
-    state.snap = {};
-    for (const r of (data.rows || [])) {
-      state.snap[r.symbol] = r;
-    }
-
-    buildWatchlist();
-    buildTable();
-    if (state.active) updateChartHeader(state.active);
-    setLastUpdate(data.source || 'sinopac');
+    applyPriceRows(data.rows || [], data.source || 'sinopac');
   } catch (e) {
     console.warn('Snapshot failed:', e.message);
     setLastUpdate('DB only');
@@ -384,7 +374,44 @@ async function fetchSnapshot(showLoading = true) {
   }
 }
 
-// ── Nav tab switching (placeholder) ───────────────────────────
+function applyPriceRows(rows, source) {
+  for (const r of rows) state.snap[r.symbol] = r;
+  buildWatchlist();
+  buildTable();
+  if (state.active) updateChartHeader(state.active);
+  setLastUpdate(source);
+}
+
+// ── SSE (real-time tick stream) ────────────────────────────────
+function initSSE() {
+  const liveEl = $('last-update');
+
+  function connect() {
+    const es = new EventSource('/api/stream');
+
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.mode) state.tickMode = data.mode;
+        if (data.rows && data.rows.length) {
+          applyPriceRows(data.rows, data.mode === 'tick' ? 'LIVE' : 'snapshot');
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    es.onerror = () => {
+      // SSE reconnects automatically; show offline state briefly
+      if (liveEl) liveEl.textContent = '連線中斷，重連…';
+      // browser will auto-reconnect after a short delay
+    };
+
+    return es;
+  }
+
+  state.es = connect();
+}
+
+// ── Nav tab switching ──────────────────────────────────────────
 function initNavTabs() {
   document.querySelectorAll('.nav-tab').forEach(tab => {
     tab.addEventListener('click', () => {
@@ -401,9 +428,9 @@ async function boot() {
   initTfButtons();
   initSearch();
 
-  $('btn-refresh')?.addEventListener('click', () => fetchSnapshot(true));
+  $('btn-refresh')?.addEventListener('click', fetchSnapshot);
 
-  // load signals from DB first (instant)
+  // 1. load signals from DB (instant — no Sinopac needed)
   try {
     await fetchSignals();
     buildWatchlist();
@@ -412,16 +439,8 @@ async function boot() {
     console.error('Signals load failed:', e);
   }
 
-  // then try live snapshot in background
-  fetchSnapshot(false);
-
-  // auto-refresh every 90 seconds during market hours
-  setInterval(() => {
-    const now = new Date();
-    const h = now.getHours(), m = now.getMinutes();
-    const inMarket = (h > 8 || (h === 8 && m >= 55)) && (h < 13 || (h === 13 && m <= 35));
-    if (inMarket) fetchSnapshot(false);
-  }, 90_000);
+  // 2. connect SSE for real-time tick data
+  initSSE();
 }
 
 document.addEventListener('DOMContentLoaded', boot);
