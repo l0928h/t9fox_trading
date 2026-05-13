@@ -13,6 +13,7 @@ TAX        = 0.0015     # 0.15%  當沖賣出稅
 LOTS       = 3
 SHARES     = LOTS * 1000
 TP_PCT     = 3.0
+SL_PCT     = 9.0    # 昨收 -9%，跌停前 1% 離場
 FAST       = 20
 SLOW       = 60
 START      = "2023-01-01"
@@ -89,8 +90,13 @@ for dt in all_dates:
             continue
 
         # 進場 → 模擬出場
-        target = open_px * (1 + TP_PCT / 100)
-        if high_px >= target:
+        low_px  = float(df["low"].iloc[idx])
+        target  = open_px * (1 + TP_PCT / 100)
+        stop_px = close_prev * (1 - SL_PCT / 100)
+        if low_px <= stop_px:
+            exit_px     = stop_px
+            exit_reason = "SL"
+        elif high_px >= target:
             exit_px     = target
             exit_reason = "TP"
         else:
@@ -136,6 +142,8 @@ else:
     print(f"獲利筆數   : {len(wins)}  ({len(wins)/len(df_t)*100:.1f}%)")
     print(f"停利命中   : {(df_t['reason']=='TP').sum()}  "
           f"({(df_t['reason']=='TP').mean()*100:.1f}%)")
+    print(f"停損觸發   : {(df_t['reason']=='SL').sum()}  "
+          f"({(df_t['reason']=='SL').mean()*100:.1f}%)")
     print(f"平均每筆   : {df_t['net'].mean():>+,.0f} TWD")
     print(f"合計淨損益 : {df_t['net'].sum():>+,.0f} TWD")
     print(f"最終資產   : {cash:>,.0f} TWD  (起始 1,000,000)")

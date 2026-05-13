@@ -14,9 +14,10 @@ class MaBreakoutBtParams:
     fast: int = 20
     slow: int = 60
     take_profit_pct: float = 3.0
+    stop_loss_pct: float = 9.0   # 跌停前出場（昨收 -9%，跌停 -10% 的前 1% 離場）
     commission_rate: float = DEFAULT_COMMISSION_RATE
     sell_tax_rate: float = DEFAULT_SELL_TAX_RATE
-    lots: int = 1            # number of lots (1 lot = 1000 shares)
+    lots: int = 1
     initial_cash: float = 1_000_000.0
 
 
@@ -31,7 +32,7 @@ class TradeRecord:
     return_pct: float
     gross_pnl: float
     net_pnl: float
-    exit_reason: str         # "take_profit" | "eod"
+    exit_reason: str         # "take_profit" | "stop_loss" | "eod"
 
 
 @dataclass
@@ -95,6 +96,7 @@ def backtest_ma_breakout(
 
         open_px      = float(df["open"].iloc[i])
         high_px      = float(df["high"].iloc[i])
+        low_px       = float(df["low"].iloc[i])
         close_px     = float(df["close"].iloc[i])
         close_prev   = float(df["close"].iloc[i - 1])
         vol_today    = float(volume.iloc[i])
@@ -118,9 +120,13 @@ def backtest_ma_breakout(
             equity_vals.append(cash)
             continue
 
-        target = open_px * (1 + p.take_profit_pct / 100)
+        target   = open_px * (1 + p.take_profit_pct / 100)
+        stop_px  = close_prev * (1 - p.stop_loss_pct / 100)
 
-        if high_px >= target:
+        if low_px <= stop_px:
+            exit_px     = stop_px
+            exit_reason = "stop_loss"
+        elif high_px >= target:
             exit_px     = target
             exit_reason = "take_profit"
         else:
@@ -213,6 +219,8 @@ def _compute_metrics(
     m["max_drawdown_pct"] = float((equity / roll_max - 1.0).min() * 100)
 
     tp_trades = trades[trades["exit_reason"] == "take_profit"]
+    sl_trades = trades[trades["exit_reason"] == "stop_loss"]
     m["take_profit_rate"] = len(tp_trades) / n
+    m["stop_loss_rate"]   = len(sl_trades) / n
 
     return m

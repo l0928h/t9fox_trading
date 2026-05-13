@@ -151,19 +151,19 @@ class BreakoutDayTrader:
 
 class MaBreakoutDayTrader:
     """
-    Strategy 3 — MA 突破＋量能過濾（單支股票，simulation-safe）
+    Strategy 3 — MA 突破（單支股票，simulation-safe）
 
     Pre-conditions (checked before open, all must pass):
         ① MA60 < MA20           多頭排列
         ② 昨收 < MA20           突破前在線下
-        ③ 昨量 > 20日均量       放量確認
 
     Entry (first qualifying tick at/after 09:00):
-        ④ tick > MA20           開盤突破
-        ⑤ gap < 3%              跳空不超過 3%（首 tick 相對昨收計算）
+        ③ tick > MA20           開盤突破
+        ④ gap < 3%              跳空不超過 3%（首 tick 相對昨收計算）
 
     Exit:
-        tick >= buy_price × (1 + take_profit_pct/100)  → take profit
+        tick <= close_prev × (1 − stop_loss_pct/100)   → stop loss (default: 回昨收)
+        tick >= buy_price  × (1 + take_profit_pct/100) → take profit
         clock >= sell_time (default 13:20)              → force-sell
     """
 
@@ -175,6 +175,7 @@ class MaBreakoutDayTrader:
         close_prev: float,
         vol_ratio: float,
         take_profit_pct: float = 3.0,
+        stop_loss_pct: float = 9.0,
         lots: int = 1,
         sell_time: str = "13:20",
     ):
@@ -184,6 +185,7 @@ class MaBreakoutDayTrader:
         self.close_prev      = close_prev
         self.vol_ratio       = vol_ratio
         self.take_profit_pct = take_profit_pct
+        self.stop_loss_pct   = stop_loss_pct
         self.lots            = lots
         self.sell_time       = datetime.time(*map(int, sell_time.split(":")))
 
@@ -210,6 +212,7 @@ class MaBreakoutDayTrader:
         symbol: str,
         broker: SinopacBroker,
         take_profit_pct: float = 3.0,
+        stop_loss_pct: float = 9.0,
         lots: int = 1,
         sell_time: str = "13:20",
     ) -> "MaBreakoutDayTrader":
@@ -222,6 +225,7 @@ class MaBreakoutDayTrader:
             close_prev=sig.close_last,
             vol_ratio=sig.vol_ratio,
             take_profit_pct=take_profit_pct,
+            stop_loss_pct=stop_loss_pct,
             lots=lots,
             sell_time=sell_time,
         )
@@ -287,6 +291,11 @@ class MaBreakoutDayTrader:
                 return
 
             if self._position_lots > 0 and not self._sold:
+                # ── stop loss check ───────────────────────────────────
+                stop_px = self.close_prev * (1 - self.stop_loss_pct / 100)
+                if price <= stop_px:
+                    self._do_sell(broker, price, reason="STOP-LOSS")
+                    return
                 # ── take profit check ─────────────────────────────────
                 target = self._buy_price * (1 + self.take_profit_pct / 100)
                 if price >= target:
