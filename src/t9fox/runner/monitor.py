@@ -293,24 +293,26 @@ class MaBreakoutDayTrader:
                     self._do_sell(broker, price, reason="TAKE-PROFIT")
                 return
 
-            # ── record first tick as open proxy, check gap (condition ⑤) ──
+            # ── 首個 tick：鎖定開盤價，一次性判斷條件②④ ──────────────
             if self._open_px is None and now >= _MARKET_OPEN and price > 0:
                 self._open_px = price
                 gap_pct = (price - self.close_prev) / self.close_prev * 100
                 if gap_pct >= 3.0:
                     _log(self.symbol, f"跳空 {gap_pct:.1f}% >= 3% — 今日不進場")
                     self._condition_ok = False
+                elif price <= self.ma_fast:
+                    _log(self.symbol,
+                         f"開盤 {price:.2f} <= MA20 {self.ma_fast:.2f} — 今日不進場")
+                    self._condition_ok = False
 
-            # ── entry: first qualifying tick after open ───────────────
-            # 若 watchlist 模式且今日已有其他標的成交，跳過
+            # ── 進場：僅在開盤首 tick 且所有條件通過時成交 ───────────
             if self._traded_today is not None and self._traded_today.is_set():
                 return
 
             if (
                 not self._bought_today
-                and now >= _MARKET_OPEN
+                and self._open_px is not None   # 首 tick 已處理
                 and self._condition_ok
-                and price > self.ma_fast
             ):
                 self._do_buy(broker, price)
 
