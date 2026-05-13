@@ -129,6 +129,29 @@ class SinopacBroker:
 
     # ── market data ────────────────────────────────────────────────────
 
+    def get_daily_kbars(self, symbol: str, start: str, end: str) -> "pd.DataFrame":
+        """
+        Daily OHLCV from Sinopac kbars API (covers both TWSE and OTC).
+
+        start / end: 'YYYY-MM-DD'
+        Returns DataFrame with DatetimeIndex and columns: open, high, low, close, volume.
+        """
+        import pandas as pd  # type: ignore[import]
+
+        contract = self.api.Contracts.Stocks[symbol]
+        kb = self.api.kbars(contract, start=start, end=end)
+        if not kb or not kb.ts:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        df = pd.DataFrame({
+            "open":   kb.Open,
+            "high":   kb.High,
+            "low":    kb.Low,
+            "close":  kb.Close,
+            "volume": kb.Volume,
+        }, index=pd.to_datetime(kb.ts, unit="ns"))
+        df.index.name = "date"
+        return df.sort_index()
+
     def get_snapshot(self, symbol: str) -> dict:
         """Latest snapshot for a stock (close/OHLC/volume/bid/ask)."""
         contract = self.api.Contracts.Stocks[symbol]

@@ -42,6 +42,14 @@ class BreakoutDayTrader:
 
     # ── public ─────────────────────────────────────────────────────────
 
+    @classmethod
+    def from_broker(cls, symbol: str, broker: SinopacBroker, lots: int = 1,
+                    lookback: int = 20, sell_time: str = "13:20") -> "BreakoutDayTrader":
+        """Build a trader by calculating n_day_high directly from Sinopac kbars."""
+        from t9fox.strategy.breakout import calc_n_day_high_from_broker
+        high = calc_n_day_high_from_broker(broker, symbol, lookback)
+        return cls(symbol=symbol, n_day_high=high, lots=lots, sell_time=sell_time)
+
     def run(self, broker: SinopacBroker) -> None:
         """Block until market close (or Ctrl-C)."""
         _log(self.symbol, f"20d-high = {self.n_day_high:.2f}  sell at {self.sell_time}")

@@ -7,6 +7,60 @@ from t9fox.data.twse_daily import load_or_fetch_daily_bars
 from t9fox.strategy.ma_crossover import MaCrossParams, ma_crossover_targets
 
 
+def _cmd_fetch_all(args: argparse.Namespace) -> int:
+    from t9fox.runner.precheck import load_watchlist
+    from t9fox.data.twse_daily import load_or_fetch_daily_bars
+    from pathlib import Path
+
+    if args.file:
+        symbols = load_watchlist(args.file)
+    else:
+        default = Path(__file__).resolve().parents[2] / "watchlist.txt"
+        symbols = load_watchlist(default) if default.is_file() else []
+    if not symbols:
+        print("No symbols found.", file=sys.stderr)
+        return 1
+
+    print(f"Fetching {len(symbols)} symbols from {args.start} ...")
+    ok, fail = 0, 0
+    for i, sym in enumerate(symbols, 1):
+        print(f"  [{i:2d}/{len(symbols)}] {sym}", end=" ", flush=True)
+        try:
+            df = load_or_fetch_daily_bars(sym, args.start, refresh=args.refresh)
+            print(f"-> {len(df)} rows")
+            ok += 1
+        except Exception as e:
+            print(f"-> ERROR: {e}", file=sys.stderr)
+            fail += 1
+    print(f"\nDone: {ok} ok, {fail} failed.")
+    return 0 if fail == 0 else 1
+
+
+def _cmd_precheck(args: argparse.Namespace) -> int:
+    from t9fox.runner.precheck import run_precheck, load_watchlist
+    from pathlib import Path
+
+    if args.file:
+        symbols = load_watchlist(args.file)
+        if not symbols:
+            print(f"No symbols found in {args.file}", file=sys.stderr)
+            return 1
+    else:
+        symbols = args.symbols or []
+        if not symbols:
+            # auto-detect watchlist.txt in project root
+            default = Path(__file__).resolve().parents[2] / "watchlist.txt"
+            if default.is_file():
+                symbols = load_watchlist(default)
+                print(f"(Using {default})")
+            else:
+                print("Provide symbols or --file, or place watchlist.txt in project root.", file=sys.stderr)
+                return 1
+
+    run_precheck(symbols, lookback=args.lookback)
+    return 0
+
+
 def _cmd_auto(args: argparse.Namespace) -> int:
     from t9fox.runner.scheduler import run_daily_loop
     try:
@@ -197,6 +251,18 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--slow", type=int, default=30)
     b.add_argument("--refresh", action="store_true")
     b.set_defaults(func=_cmd_backtest)
+
+    fa = sub.add_parser("fetch-all", help="Bulk-fetch TWSE daily data for all symbols in watchlist")
+    fa.add_argument("--file", default=None, metavar="FILE", help="Watchlist file (default: watchlist.txt)")
+    fa.add_argument("--start", default="2024-01-01", help="Start date YYYY-MM-DD (default: 2024-01-01)")
+    fa.add_argument("--refresh", action="store_true", help="Force re-fetch ignoring cache")
+    fa.set_defaults(func=_cmd_fetch_all)
+
+    pc = sub.add_parser("precheck", help="Pre-market report: snapshot + 20d-high for watchlist via Sinopac")
+    pc.add_argument("symbols", nargs="*", help="Stock codes (optional if --file or watchlist.txt exists)")
+    pc.add_argument("--file", default=None, metavar="FILE", help="Watchlist file, one symbol per line (default: watchlist.txt)")
+    pc.add_argument("--lookback", type=int, default=20, help="N-day high lookback (default: 20)")
+    pc.set_defaults(func=_cmd_precheck)
 
     au = sub.add_parser("auto", help="Daily loop: sleep until market open, run monitor, repeat each trading day")
     au.add_argument("symbol", help="Stock code, e.g. 6449")
