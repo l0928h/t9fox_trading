@@ -166,10 +166,12 @@ def _cmd_connect(args: argparse.Namespace) -> int:
 
 
 def _cmd_price(args: argparse.Namespace) -> int:
+    import datetime
     from pathlib import Path
     from t9fox.broker.credentials import SinopacCredentials
     from t9fox.broker.sinopac import SinopacBroker
     from t9fox.runner.precheck import load_watchlist
+    from t9fox.data.institutional import fetch_institutional_net
 
     # resolve symbol list
     if args.file:
@@ -204,45 +206,72 @@ def _cmd_price(args: argparse.Namespace) -> int:
 
         snap_map = {s.code: s for s in snaps}
 
-        # optionally merge today's signal data from DB (20d-high, gap%)
+        # classify TSE vs OTC from snapshot exchange field
+        tse_syms = [s.code for s in snaps if str(getattr(s, "exchange", "")).upper() in ("TSE", "TWSE")]
+        otc_syms = [s.code for s in snaps if str(getattr(s, "exchange", "")).upper() in ("OTC", "TPEx", "TPEX")]
+        # fallback: treat all as both if exchange not detected
+        if not tse_syms and not otc_syms:
+            tse_syms, otc_syms = symbols, symbols
+
+        # fetch three-major-institutional net buy/sell
+        print("Fetching institutional data ...", end="", flush=True)
+        inst_net, inst_date = fetch_institutional_net(tse_syms, otc_syms)
+        if inst_net:
+            print(f" OK ({inst_date})")
+        else:
+            print(" (unavailable)")
+
+        # merge today's signal data from DB (20d-high, gap%)
         sig_map: dict[str, dict] = {}
         try:
             from t9fox.db.store import query_signals
-            import datetime
             today = datetime.date.today().isoformat()
             rows = query_signals(date=today, limit=len(symbols) + 10)
             sig_map = {r["symbol"]: r for r in rows}
         except Exception:
             pass
 
-        has_sig = bool(sig_map)
-        hdr = f"{'Symbol':6s}  {'Close':>8s}  {'Chg':>14s}  {'Bid':>8s}  {'Ask':>8s}  {'Volume':>10s}"
+        has_sig  = bool(sig_map)
+        has_inst = bool(inst_net)
+
+        # header
+        hdr = (f"{'Symbol':6s}  {'Open':>8s}  {'Close':>8s}  {'Chg':>14s}  {'Volume':>10s}")
+        sep = (f"{'-'*6}  {'-'*8}  {'-'*8}  {'-'*14}  {'-'*10}")
+        if has_inst:
+            hdr += f"  {'3Inst(lots)':>12s}"
+            sep += f"  {'-'*12}"
         if has_sig:
             hdr += f"  {'20d-High':>8s}  {'Gap%':>7s}  Status"
-        print(f"\n{hdr}")
-        sep = f"{'-'*6}  {'-'*8}  {'-'*14}  {'-'*8}  {'-'*8}  {'-'*10}"
-        if has_sig:
             sep += f"  {'-'*8}  {'-'*7}  {'-'*15}"
-        print(sep)
+        print(f"\n{hdr}\n{sep}")
 
         for symbol in symbols:
             s = snap_map.get(symbol)
             if not s:
                 print(f"{symbol:6s}  (no data)")
                 continue
-            chg = float(s.change_price)
+            chg     = float(s.change_price)
             chg_pct = float(s.change_rate)
-            sign = "+" if chg >= 0 else ""
+            sign    = "+" if chg >= 0 else ""
             chg_str = f"{sign}{chg:.2f}({sign}{chg_pct:.2f}%)"
+            open_px = float(getattr(s, "open", 0) or 0)
             line = (
-                f"{symbol:6s}  {float(s.close):>8.2f}  {chg_str:>14s}  "
-                f"{float(s.buy_price):>8.2f}  {float(s.sell_price):>8.2f}  "
-                f"{int(s.total_volume):>10,}"
+                f"{symbol:6s}  {open_px:>8.2f}  {float(s.close):>8.2f}  "
+                f"{chg_str:>14s}  {int(s.total_volume):>10,}"
             )
+            if has_inst:
+                net_shares = inst_net.get(symbol)
+                if net_shares is not None:
+                    net_lots = net_shares // 1000
+                    inst_str = f"{net_lots:>+,}"
+                else:
+                    inst_str = "-"
+                line += f"  {inst_str:>12s}"
             if has_sig and symbol in sig_map:
                 r = sig_map[symbol]
                 line += f"  {r['high_20d']:>8.2f}  {r['gap_pct']:>+6.1f}%  {r['status']}"
             print(line)
+
         print(f"\n{len(snap_map)} symbols")
     return 0
 
