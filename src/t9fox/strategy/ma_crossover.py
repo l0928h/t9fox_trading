@@ -1,3 +1,4 @@
+# Strategy 1 — MA 均線交叉（MA Crossover）
 from __future__ import annotations
 
 from dataclasses import dataclass

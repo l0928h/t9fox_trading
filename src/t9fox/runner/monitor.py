@@ -149,6 +149,217 @@ class BreakoutDayTrader:
             _log(self.symbol, f"SELL ERROR: {e}", error=True)
 
 
+class MaBreakoutDayTrader:
+    """
+    Strategy 3 — MA 突破＋量能過濾（單支股票，simulation-safe）
+
+    Pre-conditions (checked before open, all must pass):
+        ① MA60 < MA20           多頭排列
+        ② 昨收 < MA20           突破前在線下
+        ③ 昨量 > 20日均量       放量確認
+
+    Entry (first qualifying tick at/after 09:00):
+        ④ tick > MA20           開盤突破
+        ⑤ gap < 3%              跳空不超過 3%（首 tick 相對昨收計算）
+
+    Exit:
+        tick >= buy_price × (1 + take_profit_pct/100)  → take profit
+        clock >= sell_time (default 13:20)              → force-sell
+    """
+
+    def __init__(
+        self,
+        symbol: str,
+        ma_fast: float,
+        ma_slow: float,
+        close_prev: float,
+        vol_ratio: float,
+        take_profit_pct: float = 3.0,
+        lots: int = 1,
+        sell_time: str = "13:20",
+    ):
+        self.symbol          = symbol
+        self.ma_fast         = ma_fast
+        self.ma_slow         = ma_slow
+        self.close_prev      = close_prev
+        self.vol_ratio       = vol_ratio
+        self.take_profit_pct = take_profit_pct
+        self.lots            = lots
+        self.sell_time       = datetime.time(*map(int, sell_time.split(":")))
+
+        self._lock          = threading.Lock()
+        self._bought_today  = False
+        self._position_lots = 0
+        self._buy_price     = 0.0
+        self._sold          = False
+        self._stop          = threading.Event()
+        self._open_px       = None   # 首 tick 作為開盤代理（跳空計算用）
+        self._traded_today  : threading.Event | None = None  # 共用旗標（watchlist 模式用）
+
+        # 盤前可確認的三個條件
+        self._condition_ok = (
+            ma_slow < ma_fast
+            and close_prev < ma_fast
+            and vol_ratio > 1.0
+        )
+
+    # ── public ─────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_broker(
+        cls,
+        symbol: str,
+        broker: SinopacBroker,
+        take_profit_pct: float = 3.0,
+        lots: int = 1,
+        sell_time: str = "13:20",
+    ) -> "MaBreakoutDayTrader":
+        from t9fox.strategy.ma_breakout import MaBreakoutParams, calc_ma_breakout_signal
+        sig = calc_ma_breakout_signal(broker, symbol, MaBreakoutParams())
+        return cls(
+            symbol=symbol,
+            ma_fast=sig.ma_fast,
+            ma_slow=sig.ma_slow,
+            close_prev=sig.close_last,
+            vol_ratio=sig.vol_ratio,
+            take_profit_pct=take_profit_pct,
+            lots=lots,
+            sell_time=sell_time,
+        )
+
+    def run(self, broker: SinopacBroker) -> None:
+        """Block until market close (or Ctrl-C)."""
+        cond_str = "OK" if self._condition_ok else "SKIP"
+        _log(self.symbol,
+             f"MA20={self.ma_fast:.2f}  MA60={self.ma_slow:.2f}  "
+             f"昨收={self.close_prev:.2f}  量比={self.vol_ratio:.2f}x  "
+             f"條件={cond_str}  TP={self.take_profit_pct:.1f}%  "
+             f"lots={self.lots}")
+
+        if not self._condition_ok:
+            _log(self.symbol, "Pre-condition not met — monitoring only (no trades today).")
+
+        import shioaji.constant as c  # type: ignore[import]
+
+        contract = broker.api.Contracts.Stocks[self.symbol]
+
+        @broker.api.on_tick_stk_v1()
+        def _on_tick(exchange, tick):
+            if tick.code != self.symbol:
+                return
+            self._handle_tick(broker, tick)
+
+        broker.api.quote.subscribe(
+            contract,
+            quote_type=c.QuoteType.Tick,
+            version=c.QuoteVersion.v1,
+        )
+        _log(self.symbol, "Listening … press Ctrl-C to stop")
+
+        try:
+            while not self._stop.is_set():
+                now = datetime.datetime.now().time()
+                if now >= _MARKET_CLOSE:
+                    _log(self.symbol, "Market closed — stopping.")
+                    break
+                self._stop.wait(timeout=5)
+        except KeyboardInterrupt:
+            print("\n[monitor] Interrupted by user.")
+        finally:
+            try:
+                broker.api.quote.unsubscribe(
+                    contract,
+                    quote_type=c.QuoteType.Tick,
+                    version=c.QuoteVersion.v1,
+                )
+            except Exception:
+                pass
+
+    # ── internal ───────────────────────────────────────────────────────
+
+    def _handle_tick(self, broker: SinopacBroker, tick) -> None:
+        price = float(tick.close)
+        now   = datetime.datetime.now().time()
+
+        with self._lock:
+            # ── forced sell at sell_time ──────────────────────────────
+            if now >= self.sell_time and self._position_lots > 0 and not self._sold:
+                self._do_sell(broker, price, reason="FORCE-SELL")
+                return
+
+            if self._position_lots > 0 and not self._sold:
+                # ── take profit check ─────────────────────────────────
+                target = self._buy_price * (1 + self.take_profit_pct / 100)
+                if price >= target:
+                    self._do_sell(broker, price, reason="TAKE-PROFIT")
+                return
+
+            # ── record first tick as open proxy, check gap (condition ⑤) ──
+            if self._open_px is None and now >= _MARKET_OPEN and price > 0:
+                self._open_px = price
+                gap_pct = (price - self.close_prev) / self.close_prev * 100
+                if gap_pct >= 3.0:
+                    _log(self.symbol, f"跳空 {gap_pct:.1f}% >= 3% — 今日不進場")
+                    self._condition_ok = False
+
+            # ── entry: first qualifying tick after open ───────────────
+            # 若 watchlist 模式且今日已有其他標的成交，跳過
+            if self._traded_today is not None and self._traded_today.is_set():
+                return
+
+            if (
+                not self._bought_today
+                and now >= _MARKET_OPEN
+                and self._condition_ok
+                and price > self.ma_fast
+            ):
+                self._do_buy(broker, price)
+
+    def _do_buy(self, broker: SinopacBroker, price: float) -> None:
+        target = price * (1 + self.take_profit_pct / 100)
+        _log(
+            self.symbol,
+            f"ENTRY  last={price:.2f} > MA20={self.ma_fast:.2f}"
+            f"  (MA60={self.ma_slow:.2f} < MA20)"
+            f"  target={target:.2f} (+{self.take_profit_pct:.1f}%)"
+            f"  → BUY {self.lots} lot @ {price:.2f}",
+        )
+        try:
+            result = broker.place_stock_order(self.symbol, "Buy", self.lots, price)
+            self._bought_today  = True
+            self._position_lots = self.lots
+            self._buy_price     = price
+            _log(self.symbol, f"Order sent  id={result.order_id}  status={result.status}")
+            _save_trade(self.symbol, "Buy", self.lots, price,
+                        result.order_id, result.status, broker.creds.simulation,
+                        strategy="ma_breakout_s3")
+            if self._traded_today is not None:
+                self._traded_today.set()
+                _log(self.symbol, "今日已成交，其他標的停止進場")
+        except Exception as e:
+            _log(self.symbol, f"BUY ERROR: {e}", error=True)
+
+    def _do_sell(self, broker: SinopacBroker, price: float, *, reason: str) -> None:
+        pnl = (price - self._buy_price) * self._position_lots * 1000
+        _log(
+            self.symbol,
+            f"{reason}  last={price:.2f}  bought={self._buy_price:.2f}"
+            f"  est-PnL={pnl:+,.0f} TWD"
+            f"  → SELL {self._position_lots} lot @ {price:.2f}",
+        )
+        try:
+            result = broker.place_stock_order(self.symbol, "Sell", self._position_lots, price)
+            _save_trade(self.symbol, "Sell", self._position_lots, price,
+                        result.order_id, result.status, broker.creds.simulation,
+                        strategy="ma_breakout_s3")
+            self._position_lots = 0
+            self._sold          = True
+            _log(self.symbol, f"Order sent  id={result.order_id}  status={result.status}")
+            self._stop.set()
+        except Exception as e:
+            _log(self.symbol, f"SELL ERROR: {e}", error=True)
+
+
 # ── helpers ────────────────────────────────────────────────────────────
 
 def _log(symbol: str, msg: str, *, error: bool = False) -> None:
@@ -160,6 +371,7 @@ def _log(symbol: str, msg: str, *, error: bool = False) -> None:
 def _save_trade(
     symbol: str, action: str, lots: int, price: float,
     order_id: str, order_status: str, simulation: bool,
+    strategy: str = "breakout_20d",
 ) -> None:
     try:
         from t9fox.db.store import insert_trade
@@ -167,6 +379,90 @@ def _save_trade(
             date=datetime.date.today().isoformat(),
             symbol=symbol, action=action, lots=lots, price=price,
             order_id=order_id, order_status=order_status, simulation=simulation,
+            strategy=strategy,
         )
     except Exception as e:
         _log(symbol, f"DB write failed: {e}", error=True)
+
+
+def run_ma_breakout_watchlist(
+    symbols: list,
+    broker: SinopacBroker,
+    take_profit_pct: float = 3.0,
+    lots: int = 1,
+    sell_time: str = "13:20",
+) -> None:
+    """Strategy 3 — 掃描整個 watchlist，符合條件的股票同時監控下單。"""
+    import shioaji.constant as c  # type: ignore[import]
+
+    # ── 盤前：計算所有標的訊號 ──────────────────────────────────────
+    traders: dict[str, MaBreakoutDayTrader] = {}
+    print(f"[watchlist] 計算訊號中，共 {len(symbols)} 支 ...")
+    for sym in symbols:
+        try:
+            t = MaBreakoutDayTrader.from_broker(
+                sym, broker,
+                take_profit_pct=take_profit_pct,
+                lots=lots,
+                sell_time=sell_time,
+            )
+            traders[sym] = t
+            status = "進場候選" if t._condition_ok else "條件未過"
+            _log(sym, f"MA20={t.ma_fast:.2f}  MA60={t.ma_slow:.2f}  "
+                      f"昨收={t.close_prev:.2f}  量比={t.vol_ratio:.2f}x  [{status}]")
+        except Exception as e:
+            _log(sym, f"訊號錯誤: {e}", error=True)
+
+    candidates = [s for s, t in traders.items() if t._condition_ok]
+    print(f"[watchlist] 進場候選: {len(candidates)}/{len(traders)} 支"
+          f"  {candidates if candidates else '（今日無候選）'}")
+
+    if not traders:
+        print("[watchlist] 無有效標的，結束。")
+        return
+
+    # ── 共用「今日已成交」旗標（先搶先贏） ────────────────────────
+    traded_today = threading.Event()
+    for t in traders.values():
+        t._traded_today = traded_today
+
+    # ── 單一共用 tick callback，依 code 派送給對應 trader ─────────────
+    @broker.api.on_tick_stk_v1()
+    def _on_tick(exchange, tick):
+        t = traders.get(tick.code)
+        if t:
+            t._handle_tick(broker, tick)
+
+    # ── 訂閱所有標的 tick ──────────────────────────────────────────
+    for sym in traders:
+        try:
+            broker.api.quote.subscribe(
+                broker.api.Contracts.Stocks[sym],
+                quote_type=c.QuoteType.Tick,
+                version=c.QuoteVersion.v1,
+            )
+        except Exception as e:
+            _log(sym, f"Subscribe 失敗: {e}", error=True)
+
+    _log("watchlist", f"監控中 {len(traders)} 支，按 Ctrl-C 停止 ...")
+
+    # ── 等待收盤 ───────────────────────────────────────────────────
+    stop = threading.Event()
+    try:
+        while not stop.is_set():
+            if datetime.datetime.now().time() >= _MARKET_CLOSE:
+                _log("watchlist", "收盤，停止監控。")
+                break
+            stop.wait(timeout=5)
+    except KeyboardInterrupt:
+        print("\n[watchlist] 使用者中斷。")
+    finally:
+        for sym in traders:
+            try:
+                broker.api.quote.unsubscribe(
+                    broker.api.Contracts.Stocks[sym],
+                    quote_type=c.QuoteType.Tick,
+                    version=c.QuoteVersion.v1,
+                )
+            except Exception:
+                pass

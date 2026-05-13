@@ -1,3 +1,4 @@
+# Strategy 2 — N 日高點突破（N-Day High Breakout）
 from __future__ import annotations
 
 from datetime import date, timedelta

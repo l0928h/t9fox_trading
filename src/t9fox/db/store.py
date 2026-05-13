@@ -118,15 +118,16 @@ def insert_trade(
     action: str, lots: int, price: float,
     order_id: str, order_status: str,
     simulation: bool = True,
+    strategy: str = "breakout_20d",
 ) -> None:
     init_db()
     with _conn() as con:
         con.execute("""
             INSERT INTO trades
-                (date, symbol, action, lots, price, order_id, order_status, simulation)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (date, symbol, action, lots, price, order_id, order_status, simulation, strategy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (date, symbol, action, lots, price, order_id, order_status,
-              1 if simulation else 0))
+              1 if simulation else 0, strategy))
 
 
 def query_trades(

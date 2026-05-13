@@ -138,6 +138,68 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ma_watchlist(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    from t9fox.broker.credentials import SinopacCredentials
+    from t9fox.broker.sinopac import SinopacBroker
+    from t9fox.runner.monitor import run_ma_breakout_watchlist
+    from t9fox.runner.precheck import load_watchlist
+
+    if args.file:
+        symbols = load_watchlist(args.file)
+    else:
+        default = Path(__file__).resolve().parents[2] / "watchlist.txt"
+        symbols = load_watchlist(default) if default.is_file() else []
+    if not symbols:
+        print("No symbols found.", file=sys.stderr)
+        return 1
+
+    try:
+        creds = SinopacCredentials.from_env()
+    except (EnvironmentError, FileNotFoundError) as e:
+        print(f"Credential error: {e}", file=sys.stderr)
+        return 1
+
+    with SinopacBroker(creds) as broker:
+        run_ma_breakout_watchlist(
+            symbols=symbols,
+            broker=broker,
+            take_profit_pct=args.take_profit,
+            lots=args.lots,
+            sell_time=args.sell_time,
+        )
+    return 0
+
+
+def _cmd_ma_monitor(args: argparse.Namespace) -> int:
+    from t9fox.broker.credentials import SinopacCredentials
+    from t9fox.broker.sinopac import SinopacBroker
+    from t9fox.runner.monitor import MaBreakoutDayTrader
+
+    try:
+        creds = SinopacCredentials.from_env()
+    except (EnvironmentError, FileNotFoundError) as e:
+        print(f"Credential error: {e}", file=sys.stderr)
+        return 1
+
+    with SinopacBroker(creds) as broker:
+        try:
+            trader = MaBreakoutDayTrader.from_broker(
+                symbol=args.symbol,
+                broker=broker,
+                take_profit_pct=args.take_profit,
+                lots=args.lots,
+                sell_time=args.sell_time,
+            )
+        except ValueError as e:
+            print(f"Data error: {e}", file=sys.stderr)
+            return 1
+
+        trader.run(broker)
+
+    return 0
+
+
 def _cmd_connect(args: argparse.Namespace) -> int:
     from t9fox.broker.credentials import SinopacCredentials
     from t9fox.broker.sinopac import SinopacBroker
@@ -292,6 +354,47 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
 
 
 def _cmd_backtest(args: argparse.Namespace) -> int:
+    # batch mode: read symbols from file
+    if args.file:
+        from pathlib import Path
+        wl = Path(args.file).expanduser()
+        if not wl.is_file():
+            print(f"File not found: {args.file}", file=sys.stderr)
+            return 1
+        symbols = [
+            ln.strip() for ln in wl.read_text("utf-8").splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        if not symbols:
+            print("No symbols found in file.", file=sys.stderr)
+            return 1
+        if args.strategy != "ma-breakout":
+            print("--file batch mode only supports --strategy ma-breakout", file=sys.stderr)
+            return 1
+        return _backtest_batch(symbols, args)
+
+    # single-symbol mode
+    if not args.symbol:
+        print("Provide a symbol or use --file for batch mode.", file=sys.stderr)
+        return 1
+
+    if args.sinopac and args.strategy == "ma-breakout":
+        from t9fox.broker.credentials import SinopacCredentials
+        from t9fox.broker.sinopac import SinopacBroker
+        from t9fox.data.kbars_cache import load_kbars_range
+        try:
+            creds = SinopacCredentials.from_env()
+        except (EnvironmentError, FileNotFoundError) as e:
+            print(f"Credential error: {e}", file=sys.stderr)
+            return 1
+        with SinopacBroker(creds) as broker:
+            broker.login()
+            df = load_kbars_range(broker, args.symbol, args.start, args.end, ma_warmup=90)
+        if df.empty or len(df) < 5:
+            print("Insufficient data for backtest.", file=sys.stderr)
+            return 1
+        return _backtest_ma_breakout(df, args)
+
     df = load_or_fetch_daily_bars(
         args.symbol,
         args.start,
@@ -301,6 +404,9 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     if df.empty or len(df) < 5:
         print("Insufficient data for backtest.", file=sys.stderr)
         return 1
+
+    if args.strategy == "ma-breakout":
+        return _backtest_ma_breakout(df, args)
 
     if args.strategy == "ma":
         params = MaCrossParams(fast=args.fast, slow=args.slow)
@@ -316,6 +422,187 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     print(f"Final equity: {result.final_equity:,.2f}")
     print(f"CAGR: {m['cagr']:.4f}  Sharpe: {m['sharpe']:.4f}  MaxDD: {m['max_drawdown']:.4f}")
     print(f"Trades: {len(result.trades)}")
+    return 0
+
+
+def _backtest_ma_breakout(df, args) -> int:
+    from t9fox.backtest.ma_breakout import MaBreakoutBtParams, backtest_ma_breakout
+
+    p = MaBreakoutBtParams(
+        fast=args.fast,
+        slow=args.slow,
+        take_profit_pct=args.take_profit,
+        lots=args.lots,
+        initial_cash=args.cash,
+    )
+    result = backtest_ma_breakout(df, p)
+    m = result.metrics
+
+    period_end = args.end or "today"
+    print(f"\nMA Breakout Backtest  {args.symbol}  {args.start} .. {period_end}")
+    print(f"Params: MA{p.fast}/MA{p.slow}  take-profit={p.take_profit_pct:.1f}%  lots={p.lots}")
+    print()
+
+    if result.trades.empty:
+        print("No trades generated.")
+        return 0
+
+    # per-trade table
+    print(f"{'Date':10s}  {'Entry':>7s}  {'Exit':>7s}  {'Target':>7s}  "
+          f"{'Ret%':>6s}  {'Net PnL':>9s}  {'Reason':12s}")
+    print(f"{'-'*10}  {'-'*7}  {'-'*7}  {'-'*7}  {'-'*6}  {'-'*9}  {'-'*12}")
+    for _, r in result.trades.iterrows():
+        reason_tag = "TP" if r["exit_reason"] == "take_profit" else "EOD"
+        ret_str = f"{r['return_pct']:+.2f}%"
+        print(
+            f"{r['date']:10s}  {r['entry_price']:>7.2f}  {r['exit_price']:>7.2f}  "
+            f"{r['target_price']:>7.2f}  {ret_str:>6s}  {r['net_pnl']:>+9,.0f}  {reason_tag}"
+        )
+
+    print()
+    n  = int(m["n_trades"])
+    wr = m["win_rate"] * 100
+    tp = m["take_profit_rate"] * 100
+    print(f"Trades       : {n}")
+    print(f"Win rate     : {wr:.1f}%  (take-profit hit: {tp:.1f}%)")
+    print(f"Avg return   : {m['avg_return_pct']:+.2f}%"
+          f"  (wins: {m['avg_win_pct']:+.2f}%  losses: {m['avg_loss_pct']:+.2f}%)")
+    print(f"Profit factor: {m['profit_factor']:.2f}")
+    print(f"Total return : {m['total_return_pct']:+.2f}%")
+    print(f"CAGR         : {m['cagr']:+.2f}%")
+    print(f"Sharpe       : {m['sharpe']:.2f}")
+    print(f"Max drawdown : {m['max_drawdown_pct']:.2f}%")
+    final_eq = result.equity_curve.iloc[-1]
+    print(f"Final equity : {final_eq:,.0f}  (start: {args.cash:,.0f})")
+    return 0
+
+
+def _backtest_batch(symbols: list, args) -> int:
+    """Run ma-breakout backtest on multiple symbols and print a ranked summary."""
+    import math
+    from datetime import date
+    from t9fox.backtest.ma_breakout import MaBreakoutBtParams, backtest_ma_breakout
+
+    p = MaBreakoutBtParams(
+        fast=args.fast,
+        slow=args.slow,
+        take_profit_pct=args.take_profit,
+        lots=args.lots,
+        initial_cash=args.cash,
+    )
+
+    period_end = args.end or "today"
+    source = "Sinopac" if args.sinopac else "TWSE"
+    print(f"Batch backtest  {len(symbols)} symbols  {args.start} .. {period_end}  [{source}]")
+    print(f"Params: MA{p.fast}/MA{p.slow}  take-profit={p.take_profit_pct:.1f}%")
+    print()
+
+    broker = None
+    if args.sinopac:
+        from t9fox.broker.credentials import SinopacCredentials
+        from t9fox.broker.sinopac import SinopacBroker
+        try:
+            creds = SinopacCredentials.from_env()
+        except (EnvironmentError, FileNotFoundError) as e:
+            print(f"Credential error: {e}", file=sys.stderr)
+            return 1
+        broker = SinopacBroker(creds)
+        broker.login()
+        print("  Sinopac login OK")
+
+    rows: list[dict] = []
+    errors: list[str] = []
+
+    try:
+        for i, sym in enumerate(symbols, 1):
+            print(f"  [{i:2d}/{len(symbols)}] {sym} ...", end="", flush=True)
+            try:
+                if broker:
+                    from t9fox.data.kbars_cache import load_kbars_range
+                    df = load_kbars_range(broker, sym, args.start, args.end, ma_warmup=90)
+                else:
+                    from t9fox.data.kbars_cache import load_daily_bt
+                    df = load_daily_bt(sym)
+                    if df.empty:
+                        df = load_or_fetch_daily_bars(sym, args.start, args.end, refresh=args.refresh)
+                    else:
+                        df = df.loc[args.start: (args.end or str(date.today()))]
+                if df.empty or len(df) < p.slow + 5:
+                    print(f" skip (only {len(df)} bars)")
+                    errors.append(f"{sym}: insufficient data ({len(df)} bars)")
+                    continue
+                result = backtest_ma_breakout(df, p)
+                m = result.metrics
+                rows.append({
+                    "sym":    sym,
+                    "trades": int(m["n_trades"]),
+                    "wr":     m["win_rate"] * 100,
+                    "tp":     m["take_profit_rate"] * 100,
+                    "avg":    m["avg_return_pct"],
+                    "pf":     m["profit_factor"],
+                    "total":  m["total_return_pct"],
+                    "cagr":   m["cagr"],
+                    "sharpe": m["sharpe"],
+                    "mdd":    m["max_drawdown_pct"],
+                })
+                print(f" {m['total_return_pct']:+.1f}%  CAGR {m['cagr']:+.1f}%  Sharpe {m['sharpe']:.2f}")
+            except Exception as e:
+                print(f" ERROR: {e}")
+                errors.append(f"{sym}: {e}")
+    finally:
+        if broker:
+            try:
+                broker.logout()
+            except Exception:
+                pass
+
+    if not rows:
+        print("\nNo results.")
+        return 1
+
+    # sort by total return descending
+    rows.sort(key=lambda r: r["total"], reverse=True)
+
+    print()
+    print(f"{'Rank':4s}  {'Sym':6s}  {'#':>4s}  {'WR%':>5s}  {'TP%':>5s}  "
+          f"{'AvgRet':>7s}  {'PF':>5s}  {'Total':>7s}  {'CAGR':>7s}  "
+          f"{'Sharpe':>6s}  {'MDD':>7s}")
+    print(f"{'-'*4}  {'-'*6}  {'-'*4}  {'-'*5}  {'-'*5}  "
+          f"{'-'*7}  {'-'*5}  {'-'*7}  {'-'*7}  "
+          f"{'-'*6}  {'-'*7}")
+
+    def _fmt(v, fmt=".1f", suffix=""):
+        if v is None or (isinstance(v, float) and not math.isfinite(v)):
+            return "  N/A"
+        return f"{v:{fmt}}{suffix}"
+
+    for rank, r in enumerate(rows, 1):
+        marker = " <--" if rank == 1 else ("" if rank > 3 else "")
+        pf_str = "inf" if not math.isfinite(r["pf"]) else f"{r['pf']:.2f}"
+        print(
+            f"{rank:4d}  {r['sym']:6s}  {r['trades']:>4d}  "
+            f"{r['wr']:>4.1f}%  {r['tp']:>4.1f}%  "
+            f"{r['avg']:>+6.2f}%  {pf_str:>5s}  "
+            f"{r['total']:>+6.1f}%  {_fmt(r['cagr'], '+.1f', '%'):>7s}  "
+            f"{_fmt(r['sharpe'], '.2f'):>6s}  "
+            f"{r['mdd']:>+6.1f}%"
+            f"{marker}"
+        )
+
+    # summary stats across all symbols
+    totals = [r["total"] for r in rows]
+    winners = [r for r in rows if r["total"] > 0]
+    print()
+    print(f"Profitable symbols : {len(winners)}/{len(rows)}")
+    print(f"Avg total return   : {sum(totals)/len(totals):+.1f}%")
+    best  = rows[0]
+    worst = rows[-1]
+    print(f"Best               : {best['sym']}  {best['total']:+.1f}%")
+    print(f"Worst              : {worst['sym']}  {worst['total']:+.1f}%")
+
+    if errors:
+        print(f"\nSkipped ({len(errors)}): {', '.join(e.split(':')[0] for e in errors)}")
+
     return 0
 
 
@@ -355,14 +642,22 @@ def main(argv: list[str] | None = None) -> int:
     f.set_defaults(func=_cmd_fetch)
 
     b = sub.add_parser("backtest", help="Run backtest on cached/fetched daily data")
-    b.add_argument("symbol", help="Stock code, e.g. 2330")
+    b.add_argument("symbol", nargs="?", default=None, help="Stock code (omit when using --file)")
+    b.add_argument("--file", "-f", default=None, metavar="FILE",
+                   help="Batch mode: read symbols from file (e.g. watchlist.txt)")
     b.add_argument("--start", required=True, help="YYYY-MM-DD")
-    b.add_argument("--end", default=None, help="YYYY-MM-DD")
-    b.add_argument("--cash", type=float, default=1_000_000.0, help="Initial cash TWD")
-    b.add_argument("--strategy", default="ma", choices=["ma"], help="Strategy id")
-    b.add_argument("--fast", type=int, default=10)
-    b.add_argument("--slow", type=int, default=30)
-    b.add_argument("--refresh", action="store_true")
+    b.add_argument("--end", default=None, help="YYYY-MM-DD (default: today)")
+    b.add_argument("--cash", type=float, default=1_000_000.0, help="Initial cash TWD (default: 1,000,000)")
+    b.add_argument("--strategy", default="ma-breakout", choices=["ma", "ma-breakout"],
+                   help="Strategy: ma-breakout (default) or ma (MA crossover)")
+    b.add_argument("--fast", type=int, default=20, help="Fast MA period (default: 20)")
+    b.add_argument("--slow", type=int, default=60, help="Slow MA period (default: 60)")
+    b.add_argument("--take-profit", type=float, default=3.0, metavar="PCT",
+                   help="Take-profit %% for ma-breakout (default: 3.0)")
+    b.add_argument("--lots", type=int, default=1, help="Lots per trade (default: 1)")
+    b.add_argument("--refresh", action="store_true", help="Ignore cache and re-fetch TWSE data")
+    b.add_argument("--sinopac", action="store_true",
+                   help="Use Sinopac API for data (supports both TWSE and OTC; requires .env credentials)")
     b.set_defaults(func=_cmd_backtest)
 
     rp = sub.add_parser("report", help="Query DB: signal history or trade log")
@@ -399,6 +694,20 @@ def main(argv: list[str] | None = None) -> int:
     mo.add_argument("--lots", type=int, default=1, help="Lots per trade (default: 1)")
     mo.add_argument("--sell-time", default="13:20", help="Force-sell time HH:MM (default: 13:20)")
     mo.set_defaults(func=_cmd_monitor)
+
+    mm = sub.add_parser("ma-monitor", help="MA-breakout strategy: entry when open > MA20 and MA60 < MA20, take profit at +X%")
+    mm.add_argument("symbol", help="Stock code, e.g. 6449")
+    mm.add_argument("--take-profit", type=float, default=3.0, metavar="PCT", help="Take-profit %% (default: 3.0)")
+    mm.add_argument("--lots", type=int, default=1, help="Lots per trade (default: 1)")
+    mm.add_argument("--sell-time", default="13:20", help="Force-sell time HH:MM (default: 13:20)")
+    mm.set_defaults(func=_cmd_ma_monitor)
+
+    mw = sub.add_parser("ma-watchlist", help="Strategy 3: 掃描整個 watchlist，符合條件同時監控下單（當沖）")
+    mw.add_argument("--file", "-f", default=None, metavar="FILE", help="Watchlist 檔案（預設 watchlist.txt）")
+    mw.add_argument("--take-profit", type=float, default=3.0, metavar="PCT", help="停利 %% (預設 3.0)")
+    mw.add_argument("--lots", type=int, default=1, help="每筆張數（預設 1）")
+    mw.add_argument("--sell-time", default="13:20", help="強制平倉時間 HH:MM（預設 13:20）")
+    mw.set_defaults(func=_cmd_ma_watchlist)
 
     pr = sub.add_parser("price", help="Query real-time snapshot for symbols or whole watchlist")
     pr.add_argument("symbols", nargs="*", help="Stock code(s) (omit to use watchlist.txt)")
